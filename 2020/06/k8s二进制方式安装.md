@@ -923,3 +923,1551 @@ Client sent an HTTP request to an HTTPS server.
 
 #### 3.3.2. keepalived配置
 
+aipserver L4 代理涉及的服务器：hdss7-11，hdss7-12
+
+- 安装keepalive
+
+```
+[root@hdss7-11 ~]# yum install -y keepalived
+[root@hdss7-11 ~]# vim /etc/keepalived/check_port.sh # 配置检查脚本
+#!/bin/bash
+if [ $# -eq 1 ] && [[ $1 =~ ^[0-9]+ ]];then
+    [ $(netstat -lntp|grep ":$1 " |wc -l) -eq 0 ] && echo "[ERROR] nginx may be not running!" && exit 1 || exit 0
+else
+    echo "[ERROR] need one port!"
+    exit 1
+fi
+[root@hdss7-11 ~]# chmod +x /etc/keepalived/check_port.sh
+```
+
+- 配置主节点：/etc/keepalived/keepalived.conf
+
+  **主节点中，必须加上** **nopreempt**
+
+  因为一旦因为网络抖动导致VIP漂移，不能让它自动飘回来，必须要分析原因后手动迁移VIP到主节点！如主节点确认正常后，重启备节点的keepalive，让VIP飘到主节点.
+
+  keepalived 的日志输出配置此处省略，生产中需要进行处理。
+
+  ```
+  ! Configuration File for keepalived
+  global_defs {
+     router_id 10.4.7.11
+  }
+  vrrp_script chk_nginx {
+      script "/etc/keepalived/check_port.sh 7443"
+      interval 2
+      weight -20
+  }
+  vrrp_instance VI_1 {
+      state MASTER
+      interface ens32
+      virtual_router_id 251
+      priority 100
+      advert_int 1
+      mcast_src_ip 10.4.7.11
+      nopreempt
+  
+      authentication {
+          auth_type PASS
+          auth_pass 11111111
+      }
+      track_script {
+           chk_nginx
+      }
+      virtual_ipaddress {
+          10.4.7.10
+      }
+  }
+  ```
+
+  - 配置备节点：/etc/keepalived/keepalived.conf 
+
+  ```
+  ! Configuration File for keepalived
+  global_defs {
+      router_id 10.4.7.12
+  }
+  vrrp_script chk_nginx {
+      script "/etc/keepalived/check_port.sh 7443"
+      interval 2
+      weight -20
+  }
+  vrrp_instance VI_1 {
+      state BACKUP
+      interface ens32
+      virtual_router_id 251
+      mcast_src_ip 10.4.7.12
+      priority 90
+      advert_int 1
+      authentication {
+          auth_type PASS
+          auth_pass 11111111
+      }
+      track_script {
+          chk_nginx
+      }
+      virtual_ipaddress {
+          10.4.7.10
+      }
+  }
+  ```
+
+- 启动keepalived
+
+```
+[root@hdss7-11 ~]# systemctl start keepalived ; systemctl enable keepalived
+[root@hdss7-11 ~]# ip addr show ens32
+2: ens32: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 00:0c:29:6d:b8:82 brd ff:ff:ff:ff:ff:ff
+    inet 10.4.7.11/24 brd 10.4.7.255 scope global noprefixroute ens32
+       valid_lft forever preferred_lft forever
+    inet 10.4.7.10/32 scope global ens32
+       valid_lft forever preferred_lft forever
+......
+```
+
+
+
+### 3.4. controller-manager 安装
+
+controller-manager 涉及的服务器：hdss7-21，hdss7-22
+
+controller-manager 设置为只调用当前机器的 apiserver，走127.0.0.1网卡，因此不配制SSL证书
+
+```
+[root@hdss7-21 ~]# vim /opt/apps/kubernetes/server/bin/kube-controller-manager-startup.sh
+#!/bin/sh
+WORK_DIR=$(dirname $(readlink -f $0))
+[ $? -eq 0 ] && cd $WORK_DIR || exit
+
+/opt/apps/kubernetes/server/bin/kube-controller-manager \
+    --cluster-cidr 172.7.0.0/16 \
+    --leader-elect true \
+    --log-dir /data/logs/kubernetes/kube-controller-manager \
+    --master http://127.0.0.1:8080 \
+    --service-account-private-key-file ./certs/ca-key.pem \
+    --service-cluster-ip-range 192.168.0.0/16 \
+    --root-ca-file ./certs/ca.pem \
+    --v 2
+[root@hdss7-21 ~]# chmod u+x /opt/apps/kubernetes/server/bin/kube-controller-manager-startup.sh
+```
+
+```
+[root@hdss7-21 ~]# vim /etc/supervisord.d/kube-controller-manager.ini
+[program:kube-controller-manager-7-21]
+command=/opt/apps/kubernetes/server/bin/kube-controller-manager-startup.sh                     ; the program (relative uses PATH, can take args)
+numprocs=1                                                                        ; number of processes copies to start (def 1)
+directory=/opt/apps/kubernetes/server/bin                                              ; directory to cwd to before exec (def no cwd)
+autostart=true                                                                    ; start at supervisord start (default: true)
+autorestart=true                                                                  ; retstart at unexpected quit (default: true)
+startsecs=30                                                                      ; number of secs prog must stay running (def. 1)
+startretries=3                                                                    ; max # of serial start failures (default 3)
+exitcodes=0,2                                                                     ; 'expected' exit codes for process (default 0,2)
+stopsignal=QUIT                                                                   ; signal used to kill process (default TERM)
+stopwaitsecs=10                                                                   ; max num secs to wait b4 SIGKILL (default 10)
+user=root                                                                         ; setuid to this UNIX account to run the program
+redirect_stderr=true                                                              ; redirect proc stderr to stdout (default false)
+stdout_logfile=/data/logs/kubernetes/kube-controller-manager/controller.stdout.log  ; stderr log path, NONE for none; default AUTO
+stdout_logfile_maxbytes=64MB                                                      ; max # logfile bytes b4 rotation (default 50MB)
+stdout_logfile_backups=4                                                          ; # of stdout logfile backups (default 10)
+stdout_capture_maxbytes=1MB                                                       ; number of bytes in 'capturemode' (default 0)
+stdout_events_enabled=false                                                       ; emit events on stdout writes (default false)
+```
+
+```
+[root@hdss7-21 ~]# supervisorctl update
+kube-controller-manager-7-21: stopped
+kube-controller-manager-7-21: updated process group
+[root@hdss7-21 ~]# supervisorctl status
+etcd-server-7-21                 RUNNING   pid 23637, uptime 1 day, 0:16:54
+kube-apiserver-7-21              RUNNING   pid 32591, uptime 1:56:23
+kube-controller-manager-7-21     RUNNING   pid 33357, uptime 0:00:38
+```
+
+
+
+### 3.5. kube-scheduler安装
+
+kube-scheduler 涉及的服务器：hdss7-21，hdss7-22
+
+kube-scheduler 设置为只调用当前机器的 apiserver，走127.0.0.1网卡，因此不配制SSL证书
+
+```
+[root@hdss7-21 ~]# vim /opt/apps/kubernetes/server/bin/kube-scheduler-startup.sh
+#!/bin/sh
+WORK_DIR=$(dirname $(readlink -f $0))
+[ $? -eq 0 ] && cd $WORK_DIR || exit
+
+/opt/apps/kubernetes/server/bin/kube-scheduler \
+    --leader-elect  \
+    --log-dir /data/logs/kubernetes/kube-scheduler \
+    --master http://127.0.0.1:8080 \
+    --v 2
+[root@hdss7-21 ~]# chmod u+x /opt/apps/kubernetes/server/bin/kube-scheduler-startup.sh
+[root@hdss7-21 ~]# mkdir -p /data/logs/kubernetes/kube-scheduler
+```
+
+```
+[root@hdss7-21 ~]# vim /etc/supervisord.d/kube-scheduler.ini
+[program:kube-scheduler-7-21]
+command=/opt/apps/kubernetes/server/bin/kube-scheduler-startup.sh                     
+numprocs=1                                                               
+directory=/opt/apps/kubernetes/server/bin                                     
+autostart=true                                                           
+autorestart=true                                                         
+startsecs=30                                                             
+startretries=3                                                           
+exitcodes=0,2                                                            
+stopsignal=QUIT                                                          
+stopwaitsecs=10                                                          
+user=root                                                                
+redirect_stderr=true                                                     
+stdout_logfile=/data/logs/kubernetes/kube-scheduler/scheduler.stdout.log 
+stdout_logfile_maxbytes=64MB                                             
+stdout_logfile_backups=4                                                 
+stdout_capture_maxbytes=1MB                                              
+stdout_events_enabled=false 
+```
+
+```
+[root@hdss7-21 ~]# supervisorctl update
+kube-scheduler-7-21: stopped
+kube-scheduler-7-21: updated process group
+[root@hdss7-21 ~]# supervisorctl status 
+etcd-server-7-21                 RUNNING   pid 23637, uptime 1 day, 0:26:53
+kube-apiserver-7-21              RUNNING   pid 32591, uptime 2:06:22
+kube-controller-manager-7-21     RUNNING   pid 33357, uptime 0:10:37
+kube-scheduler-7-21              RUNNING   pid 33450, uptime 0:01:18
+```
+
+
+
+### 3.6. 检查主控节点状态
+
+```
+[root@hdss7-21 ~]# ln -s /opt/apps/kubernetes/server/bin/kubectl /usr/local/bin/
+[root@hdss7-21 ~]# kubectl get cs
+NAME                 STATUS    MESSAGE              ERROR
+scheduler            Healthy   ok                   
+controller-manager   Healthy   ok                   
+etcd-1               Healthy   {"health": "true"}   
+etcd-0               Healthy   {"health": "true"}   
+etcd-2               Healthy   {"health": "true"}   
+```
+
+```
+[root@hdss7-22 ~]# ln -s /opt/apps/kubernetes/server/bin/kubectl /usr/local/bin/
+[root@hdss7-22 ~]# kubectl get cs
+NAME                 STATUS    MESSAGE              ERROR
+controller-manager   Healthy   ok                   
+scheduler            Healthy   ok                   
+etcd-2               Healthy   {"health": "true"}   
+etcd-1               Healthy   {"health": "true"}   
+etcd-0               Healthy   {"health": "true"} 
+```
+
+
+
+## 4. 运算节点部署
+
+### 4.1. kubelet 部署
+
+#### 4.1.1. 签发证书
+
+证书签发在 hdss7-200 操作
+
+```
+[root@hdss7-200 ~]# cd /opt/certs/
+[root@hdss7-200 certs]# vim kubelet-csr.json # 将所有可能的kubelet机器IP添加到hosts中
+{
+    "CN": "k8s-kubelet",
+    "hosts": [
+    "127.0.0.1",
+    "10.4.7.10",
+    "10.4.7.21",
+    "10.4.7.22",
+    "10.4.7.23",
+    "10.4.7.24",
+    "10.4.7.25",
+    "10.4.7.26",
+    "10.4.7.27",
+    "10.4.7.28"
+    ],
+    "key": {
+        "algo": "rsa",
+        "size": 2048
+    },
+    "names": [
+        {
+            "C": "CN",
+            "ST": "beijing",
+            "L": "beijing",
+            "O": "od",
+            "OU": "ops"
+        }
+    ]
+}
+[root@hdss7-200 certs]# cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server kubelet-csr.json | cfssl-json -bare kubelet
+2020/01/06 23:10:56 [INFO] generate received request
+2020/01/06 23:10:56 [INFO] received CSR
+2020/01/06 23:10:56 [INFO] generating key: rsa-2048
+2020/01/06 23:10:56 [INFO] encoded CSR
+2020/01/06 23:10:56 [INFO] signed certificate with serial number 61221942784856969738771370531559555767101820379
+2020/01/06 23:10:56 [WARNING] This certificate lacks a "hosts" field. This makes it unsuitable for
+websites. For more information see the Baseline Requirements for the Issuance and Management
+of Publicly-Trusted Certificates, v.1.1.6, from the CA/Browser Forum (https://cabforum.org);
+specifically, section 10.2.3 ("Information Requirements").
+[root@hdss7-200 certs]# ls kubelet* -l
+-rw-r--r-- 1 root root 1115 Jan  6 23:10 kubelet.csr
+-rw-r--r-- 1 root root  452 Jan  6 23:10 kubelet-csr.json
+-rw------- 1 root root 1675 Jan  6 23:10 kubelet-key.pem
+-rw-r--r-- 1 root root 1468 Jan  6 23:10 kubelet.pem
+
+[root@hdss7-200 certs]# scp kubelet.pem kubelet-key.pem hdss7-21:/opt/apps/kubernetes/server/bin/certs/
+[root@hdss7-200 certs]# scp kubelet.pem kubelet-key.pem hdss7-22:/opt/apps/kubernetes/server/bin/certs/
+```
+
+
+
+#### 4.1.2. 创建kubelet配置
+
+kubelet配置在 hdss7-21 hdss7-22 操作
+
+- set-cluster  # 创建需要连接的集群信息，可以创建多个k8s集群信息
+
+```
+[root@hdss7-21 ~]# kubectl config set-cluster myk8s \
+--certificate-authority=/opt/apps/kubernetes/server/bin/certs/ca.pem \
+--embed-certs=true \
+--server=https://10.4.7.10:7443 \
+--kubeconfig=/opt/apps/kubernetes/conf/kubelet.kubeconfig
+```
+
+
+
+- set-credentials  # 创建用户账号，即用户登陆使用的客户端私有和证书，可以创建多个证书
+
+```
+[root@hdss7-21 ~]# kubectl config set-credentials k8s-node \
+--client-certificate=/opt/apps/kubernetes/server/bin/certs/client.pem \
+--client-key=/opt/apps/kubernetes/server/bin/certs/client-key.pem \
+--embed-certs=true \
+--kubeconfig=/opt/apps/kubernetes/conf/kubelet.kubeconfig
+```
+
+- set-context  # 设置context，即确定账号和集群对应关系
+
+```
+[root@hdss7-21 ~]# kubectl config set-context myk8s-context \
+--cluster=myk8s \
+--user=k8s-node \
+--kubeconfig=/opt/apps/kubernetes/conf/kubelet.kubeconfig
+```
+
+- use-context  # 设置当前使用哪个context
+
+```
+[root@hdss7-21 ~]# kubectl config use-context myk8s-context --kubeconfig=/opt/apps/kubernetes/conf/kubelet.kubeconfig
+```
+
+
+
+#### 4.1.3. 授权k8s-node用户
+
+**此步骤只需要在一台master节点执行**
+
+授权 k8s-node 用户绑定集群角色 system:node ，让 k8s-node 成为具备运算节点的权限。
+
+```
+[root@hdss7-21 ~]# vim k8s-node.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8s-node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: k8s-node
+[root@hdss7-21 ~]# kubectl create -f k8s-node.yaml 
+clusterrolebinding.rbac.authorization.k8s.io/k8s-node created
+[root@hdss7-21 ~]# kubectl get clusterrolebinding k8s-node
+NAME       AGE
+k8s-node   36s
+```
+
+#### 4.1.4. 装备pause镜像
+
+将pause镜像放入到harbor私有仓库中，仅在 hdss7-200 操作：
+
+```
+[root@hdss7-200 ~]# docker image pull kubernetes/pause
+[root@hdss7-200 ~]# docker image tag kubernetes/pause:latest harbor.od.com/public/pause:latest
+[root@hdss7-200 ~]# docker login -u admin harbor.od.com
+[root@hdss7-200 ~]# docker image push harbor.od.com/public/pause:latest
+```
+
+#### 4.1.5. 创建启动脚本
+
+在node节点创建脚本并启动kubelet，涉及服务器： hdss7-21  hdss7-22
+
+```
+[root@hdss7-21 ~]# vim /opt/apps/kubernetes/server/bin/kubelet-startup.sh
+#!/bin/sh
+
+WORK_DIR=$(dirname $(readlink -f $0))
+[ $? -eq 0 ] && cd $WORK_DIR || exit
+
+/opt/apps/kubernetes/server/bin/kubelet \
+    --anonymous-auth=false \
+    --cgroup-driver systemd \
+    --cluster-dns 192.168.0.2 \
+    --cluster-domain cluster.local \
+    --runtime-cgroups=/systemd/system.slice \
+    --kubelet-cgroups=/systemd/system.slice \
+    --fail-swap-on="false" \
+    --client-ca-file ./certs/ca.pem \
+    --tls-cert-file ./certs/kubelet.pem \
+    --tls-private-key-file ./certs/kubelet-key.pem \
+    --hostname-override hdss7-21.host.com \
+    --image-gc-high-threshold 20 \
+    --image-gc-low-threshold 10 \
+    --kubeconfig ../../conf/kubelet.kubeconfig \
+    --log-dir /data/logs/kubernetes/kube-kubelet \
+    --pod-infra-container-image harbor.od.com/public/pause:latest \
+    --root-dir /data/kubelet
+[root@hdss7-21 ~]# chmod u+x /opt/apps/kubernetes/server/bin/kubelet-startup.sh
+[root@hdss7-21 ~]# mkdir -p /data/logs/kubernetes/kube-kubelet /data/kubelet
+
+[root@hdss7-21 ~]# vim /etc/supervisord.d/kube-kubelet.ini
+[program:kube-kubelet-7-21]
+command=/opt/apps/kubernetes/server/bin/kubelet-startup.sh
+numprocs=1
+directory=/opt/apps/kubernetes/server/bin
+autostart=true
+autorestart=true
+startsecs=30
+startretries=3
+exitcodes=0,2
+stopsignal=QUIT
+stopwaitsecs=10
+user=root
+redirect_stderr=true
+stdout_logfile=/data/logs/kubernetes/kube-kubelet/kubelet.stdout.log
+stdout_logfile_maxbytes=64MB
+stdout_logfile_backups=5
+stdout_capture_maxbytes=1MB
+stdout_events_enabled=false
+```
+
+```
+[root@hdss7-21 ~]# supervisorctl update
+[root@hdss7-21 ~]# supervisorctl status
+etcd-server-7-21                 RUNNING   pid 23637, uptime 1 day, 14:56:25
+kube-apiserver-7-21              RUNNING   pid 32591, uptime 16:35:54
+kube-controller-manager-7-21     RUNNING   pid 33357, uptime 14:40:09
+kube-kubelet-7-21                RUNNING   pid 37232, uptime 0:01:08
+kube-scheduler-7-21              RUNNING   pid 33450, uptime 14:30:50
+[root@hdss7-21 ~]# kubectl get node
+NAME                STATUS   ROLES    AGE     VERSION
+hdss7-21.host.com   Ready    <none>   3m13s   v1.15.2
+hdss7-22.host.com   Ready    <none>   3m13s   v1.15.2
+```
+
+#### 4.1.6. 修改节点角色
+
+使用 kubectl get nodes 获取的Node节点角色为空，可以按照以下方式修改
+
+```
+[root@hdss7-21 ~]# kubectl get node
+NAME                STATUS   ROLES    AGE     VERSION
+hdss7-21.host.com   Ready    <none>   3m13s   v1.15.2
+hdss7-22.host.com   Ready    <none>   3m13s   v1.15.2
+[root@hdss7-21 ~]# kubectl label node hdss7-21.host.com node-role.kubernetes.io/node=
+node/hdss7-21.host.com labeled
+[root@hdss7-21 ~]# kubectl label node hdss7-21.host.com node-role.kubernetes.io/master=
+node/hdss7-21.host.com labeled
+[root@hdss7-21 ~]# kubectl label node hdss7-22.host.com node-role.kubernetes.io/master=
+node/hdss7-22.host.com labeled
+[root@hdss7-21 ~]# kubectl label node hdss7-22.host.com node-role.kubernetes.io/node=
+node/hdss7-22.host.com labeled
+[root@hdss7-21 ~]# kubectl get node
+NAME                STATUS   ROLES         AGE     VERSION
+hdss7-21.host.com   Ready    master,node   7m44s   v1.15.2
+hdss7-22.host.com   Ready    master,node   7m44s   v1.15.2
+```
+
+### 4.2. kube-proxy部署
+
+#### 4.2.1. 签发证书
+
+证书签发在 hdss7-200 操作
+
+```
+[root@hdss7-200 ~]# cd /opt/certs/
+[root@hdss7-200 certs]# vim kube-proxy-csr.json  # CN 其实是k8s中的角色
+{
+    "CN": "system:kube-proxy",
+    "key": {
+        "algo": "rsa",
+        "size": 2048
+    },
+    "names": [
+        {
+            "C": "CN",
+            "ST": "beijing",
+            "L": "beijing",
+            "O": "od",
+            "OU": "ops"
+        }
+    ]
+}
+[root@hdss7-200 certs]# cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=client kube-proxy-csr.json |cfssl-json -bare kube-proxy-client
+2020/01/07 21:45:53 [INFO] generate received request
+2020/01/07 21:45:53 [INFO] received CSR
+2020/01/07 21:45:53 [INFO] generating key: rsa-2048
+2020/01/07 21:45:53 [INFO] encoded CSR
+2020/01/07 21:45:53 [INFO] signed certificate with serial number 620191685968917036075463174423999296907693104226
+2020/01/07 21:45:53 [WARNING] This certificate lacks a "hosts" field. This makes it unsuitable for
+websites. For more information see the Baseline Requirements for the Issuance and Management
+of Publicly-Trusted Certificates, v.1.1.6, from the CA/Browser Forum (https://cabforum.org);
+[root@hdss7-200 certs]# ls kube-proxy-c* -l  # 因为kube-proxy使用的用户是kube-proxy，不能使用client证书，必须要重新签发自己的证书
+-rw-r--r-- 1 root root 1005 Jan  7 21:45 kube-proxy-client.csr
+-rw------- 1 root root 1675 Jan  7 21:45 kube-proxy-client-key.pem
+-rw-r--r-- 1 root root 1375 Jan  7 21:45 kube-proxy-client.pem
+-rw-r--r-- 1 root root  267 Jan  7 21:45 kube-proxy-csr.json
+
+[root@hdss7-200 certs]# scp kube-proxy-client-key.pem kube-proxy-client.pem hdss7-21:/opt/apps/kubernetes/server/bin/certs/                                                                         100% 1375   870.6KB/s   00:00    
+[root@hdss7-200 certs]# scp kube-proxy-client-key.pem kube-proxy-client.pem hdss7-22:/opt/apps/kubernetes/server/bin/certs/
+```
+
+#### 4.2.2. 创建kube-proxy配置
+
+在所有node节点创建，涉及服务器：hdss7-21 ，hdss7-22
+
+```
+[root@hdss7-21 ~]# kubectl config set-cluster myk8s \
+--certificate-authority=/opt/apps/kubernetes/server/bin/certs/ca.pem \
+--embed-certs=true \
+--server=https://10.4.7.10:7443 \
+--kubeconfig=/opt/apps/kubernetes/conf/kube-proxy.kubeconfig
+  
+[root@hdss7-21 ~]# kubectl config set-credentials kube-proxy \
+--client-certificate=/opt/apps/kubernetes/server/bin/certs/kube-proxy-client.pem \
+--client-key=/opt/apps/kubernetes/server/bin/certs/kube-proxy-client-key.pem \
+--embed-certs=true \
+--kubeconfig=/opt/apps/kubernetes/conf/kube-proxy.kubeconfig
+  
+[root@hdss7-21 ~]# kubectl config set-context myk8s-context \
+--cluster=myk8s \
+--user=kube-proxy \
+--kubeconfig=/opt/apps/kubernetes/conf/kube-proxy.kubeconfig
+  
+[root@hdss7-21 ~]# kubectl config use-context myk8s-context --kubeconfig=/opt/apps/kubernetes/conf/kube-proxy.kubeconfig
+```
+
+#### 4.2.3. 加载ipvs模块
+
+kube-proxy 共有3种流量调度模式，分别是 namespace，iptables，ipvs，其中ipvs性能最好。
+
+```
+[root@hdss7-21 ~]# for i in $(ls /usr/lib/modules/$(uname -r)/kernel/net/netfilter/ipvs|grep -o "^[^.]*");do echo $i; /sbin/modinfo -F filename $i >/dev/null 2>&1 && /sbin/modprobe $i;done
+[root@hdss7-21 ~]# lsmod | grep ip_vs  # 查看ipvs模块
+```
+
+#### 4.2.4. 创建启动脚本
+
+```
+[root@hdss7-21 ~]# vim /opt/apps/kubernetes/server/bin/kube-proxy-startup.sh
+#!/bin/sh
+
+WORK_DIR=$(dirname $(readlink -f $0))
+[ $? -eq 0 ] && cd $WORK_DIR || exit
+
+/opt/apps/kubernetes/server/bin/kube-proxy \
+  --cluster-cidr 172.7.0.0/16 \
+  --hostname-override hdss7-21.host.com \
+  --proxy-mode=ipvs \
+  --ipvs-scheduler=nq \
+  --kubeconfig ../../conf/kube-proxy.kubeconfig
+[root@hdss7-21 ~]# chmod u+x /opt/apps/kubernetes/server/bin/kube-proxy-startup.sh
+[root@hdss7-21 ~]# mkdir -p /data/logs/kubernetes/kube-proxy
+[root@hdss7-21 ~]# vim /etc/supervisord.d/kube-proxy.ini
+[program:kube-proxy-7-21]
+command=/opt/apps/kubernetes/server/bin/kube-proxy-startup.sh                
+numprocs=1                                                      
+directory=/opt/apps/kubernetes/server/bin                            
+autostart=true                                                  
+autorestart=true                                                
+startsecs=30                                                    
+startretries=3                                                  
+exitcodes=0,2                                                   
+stopsignal=QUIT                                                 
+stopwaitsecs=10                                                 
+user=root                                                       
+redirect_stderr=true                                            
+stdout_logfile=/data/logs/kubernetes/kube-proxy/proxy.stdout.log
+stdout_logfile_maxbytes=64MB                                    
+stdout_logfile_backups=5                                       
+stdout_capture_maxbytes=1MB                                     
+stdout_events_enabled=false
+
+[root@hdss7-21 ~]# supervisorctl update
+```
+
+#### 4.2.5. 验证集群
+
+```
+[root@hdss7-21 ~]# supervisorctl status
+etcd-server-7-21                 RUNNING   pid 23637, uptime 2 days, 0:27:18
+kube-apiserver-7-21              RUNNING   pid 32591, uptime 1 day, 2:06:47
+kube-controller-manager-7-21     RUNNING   pid 33357, uptime 1 day, 0:11:02
+kube-kubelet-7-21                RUNNING   pid 37232, uptime 9:32:01
+kube-proxy-7-21                  RUNNING   pid 47088, uptime 0:06:19
+kube-scheduler-7-21              RUNNING   pid 33450, uptime 1 day, 0:01:43
+
+[root@hdss7-21 ~]# yum install -y ipvsadm
+[root@hdss7-21 ~]# ipvsadm -Ln
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.0.1:443 nq
+  -> 10.4.7.21:6443               Masq    1      0          0         
+  -> 10.4.7.22:6443               Masq    1      0          0  
+```
+
+
+
+```
+[root@hdss7-21 ~]# curl -I 172.7.21.2
+HTTP/1.1 200 OK
+Server: nginx/1.17.6
+Date: Tue, 07 Jan 2020 14:28:46 GMT
+Content-Type: text/html
+Content-Length: 612
+Last-Modified: Tue, 19 Nov 2019 12:50:08 GMT
+Connection: keep-alive
+ETag: "5dd3e500-264"
+Accept-Ranges: bytes
+
+[root@hdss7-21 ~]# curl -I 172.7.22.2  # 缺少网络插件，无法跨节点通信
+```
+
+
+
+## 5. 核心插件部署
+
+### 5.1. CNI网络插件
+
+kubernetes设计了网络模型，但是pod之间通信的具体实现交给了CNI往插件。常用的CNI网络插件有：Flannel 、Calico、Canal、Contiv等，其中Flannel和Calico占比接近80%，Flannel占比略多于Calico。本次部署使用Flannel作为网络插件。涉及的机器 hdss7-21,hdss7-22
+
+#### 5.1.1. 安装Flannel
+
+github地址：https://github.com/coreos/flannel/releases
+
+涉及的机器 hdss7-21,hdss7-22
+
+```
+[root@hdss7-21 ~]# cd /opt/src/
+[root@hdss7-21 src]# wget https://github.com/coreos/flannel/releases/download/v0.11.0/flannel-v0.11.0-linux-amd64.tar.gz
+[root@hdss7-21 src]# mkdir /opt/release/flannel-v0.11.0 # 因为flannel压缩包内部没有套目录
+[root@hdss7-21 src]# tar -xf flannel-v0.11.0-linux-amd64.tar.gz -C /opt/release/flannel-v0.11.0 
+[root@hdss7-21 src]# ln -s /opt/release/flannel-v0.11.0 /opt/apps/flannel
+[root@hdss7-21 src]# ll /opt/apps/flannel
+lrwxrwxrwx 1 root root 28 Jan  9 22:33 /opt/apps/flannel -> /opt/release/flannel-v0.11.0
+```
+
+#### 5.1.2. 拷贝证书
+
+```
+# flannel 需要以客户端的身份访问etcd，需要相关证书
+[root@hdss7-21 src]# mkdir /opt/apps/flannel/certs
+[root@hdss7-200 ~]# cd /opt/certs/
+[root@hdss7-200 certs]# scp ca.pem client-key.pem client.pem hdss7-21:/opt/apps/flannel/certs/
+```
+
+#### 5.1.3. 创建启动脚本
+
+涉及的机器 hdss7-21,hdss7-22
+
+```
+[root@hdss7-21 src]# vim /opt/apps/flannel/subnet.env # 创建子网信息，7-22的subnet需要修改
+FLANNEL_NETWORK=172.7.0.0/16
+FLANNEL_SUBNET=172.7.21.1/24
+FLANNEL_MTU=1500
+FLANNEL_IPMASQ=false
+[root@hdss7-21 src]# /opt/apps/etcd/etcdctl set /coreos.com/network/config '{"Network": "172.7.0.0/16", "Backend": {"Type": "host-gw"}}'
+[root@hdss7-21 src]# /opt/apps/etcd/etcdctl get /coreos.com/network/config # 只需要在一台etcd机器上设置就可以了
+{"Network": "172.7.0.0/16", "Backend": {"Type": "host-gw"}}
+```
+
+```
+# public-ip 为本机IP，iface 为当前宿主机对外网卡
+[root@hdss7-21 src]# vim /opt/apps/flannel/flannel-startup.sh 
+#!/bin/sh
+
+WORK_DIR=$(dirname $(readlink -f $0))
+[ $? -eq 0 ] && cd $WORK_DIR || exit
+
+/opt/apps/flannel/flanneld \
+    --public-ip=10.4.7.21 \
+    --etcd-endpoints=https://10.4.7.12:2379,https://10.4.7.21:2379,https://10.4.7.22:2379 \
+    --etcd-keyfile=./certs/client-key.pem \
+    --etcd-certfile=./certs/client.pem \
+    --etcd-cafile=./certs/ca.pem \
+    --iface=ens32 \
+    --subnet-file=./subnet.env \
+    --healthz-port=2401
+[root@hdss7-21 src]# chmod u+x /opt/apps/flannel/flannel-startup.sh
+```
+
+```
+[root@hdss7-21 src]# vim /etc/supervisord.d/flannel.ini
+[program:flanneld-7-21]
+command=/opt/apps/flannel/flannel-startup.sh                 ; the program (relative uses PATH, can take args)
+numprocs=1                                                   ; number of processes copies to start (def 1)
+directory=/opt/apps/flannel                                  ; directory to cwd to before exec (def no cwd)
+autostart=true                                               ; start at supervisord start (default: true)
+autorestart=true                                             ; retstart at unexpected quit (default: true)
+startsecs=30                                                 ; number of secs prog must stay running (def. 1)
+startretries=3                                               ; max # of serial start failures (default 3)
+exitcodes=0,2                                                ; 'expected' exit codes for process (default 0,2)
+stopsignal=QUIT                                              ; signal used to kill process (default TERM)
+stopwaitsecs=10                                              ; max num secs to wait b4 SIGKILL (default 10)
+user=root                                                    ; setuid to this UNIX account to run the program
+redirect_stderr=true                                         ; redirect proc stderr to stdout (default false)
+stdout_logfile=/data/logs/flanneld/flanneld.stdout.log       ; stderr log path, NONE for none; default AUTO
+stdout_logfile_maxbytes=64MB                                 ; max # logfile bytes b4 rotation (default 50MB)
+stdout_logfile_backups=5                                     ; # of stdout logfile backups (default 10)
+stdout_capture_maxbytes=1MB                                  ; number of bytes in 'capturemode' (default 0)
+stdout_events_enabled=false                                  ; emit events on stdout writes (default false)
+[root@hdss7-21 src]# mkdir -p /data/logs/flanneld/
+[root@hdss7-21 src]# supervisorctl update
+flanneld-7-21: added process group
+[root@hdss7-21 src]# supervisorctl status
+etcd-server-7-21                 RUNNING   pid 1058, uptime -1 day, 16:33:25
+flanneld-7-21                    RUNNING   pid 13154, uptime 0:00:30
+kube-apiserver-7-21              RUNNING   pid 1061, uptime -1 day, 16:33:25
+kube-controller-manager-7-21     RUNNING   pid 1068, uptime -1 day, 16:33:25
+kube-kubelet-7-21                RUNNING   pid 1052, uptime -1 day, 16:33:25
+kube-proxy-7-21                  RUNNING   pid 1082, uptime -1 day, 16:33:25
+kube-scheduler-7-21              RUNNING   pid 1089, uptime -1 day, 16:33:25
+```
+
+#### 5.1.4. 验证跨网络访问
+
+```
+[root@hdss7-21 src]# kubectl get pods -o wide
+NAME             READY   STATUS    RESTARTS   AGE   IP           NODE                NOMINATED NODE   READINESS GATES
+nginx-ds-7db29   1/1     Running   1          2d    172.7.22.2   hdss7-22.host.com   <none>           <none>
+nginx-ds-vvsz7   1/1     Running   1          2d    172.7.21.2   hdss7-21.host.com   <none>           <none>
+[root@hdss7-21 src]# curl -I 172.7.22.2
+HTTP/1.1 200 OK
+Server: nginx/1.17.6
+Date: Thu, 09 Jan 2020 14:55:21 GMT
+Content-Type: text/html
+Content-Length: 612
+Last-Modified: Tue, 19 Nov 2019 12:50:08 GMT
+Connection: keep-alive
+ETag: "5dd3e500-264"
+Accept-Ranges: bytes
+```
+
+#### 5.1.5. 解决pod间IP透传问题
+
+所有Node上操作，即优化NAT网络
+
+```
+# 从pod a跨宿主机访问pod b时，在pod b中能看到的地址为 pod a 宿主机地址
+[root@nginx-ds-jdp7q /]# tail -f /usr/local/nginx/logs/access.log
+10.4.7.22 - - [13/Jan/2020:13:13:39 +0000] "GET / HTTP/1.1" 200 12 "-" "curl/7.29.0"
+10.4.7.22 - - [13/Jan/2020:13:14:27 +0000] "GET / HTTP/1.1" 200 12 "-" "curl/7.29.0"
+10.4.7.22 - - [13/Jan/2020:13:54:20 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/7.29.0"
+10.4.7.22 - - [13/Jan/2020:13:54:25 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/7.29.0"
+[root@hdss7-21 ~]# iptables-save |grep POSTROUTING|grep docker # 引发问题的规则
+-A POSTROUTING -s 172.7.21.0/24 ! -o docker0 -j MASQUERADE
+```
+
+```
+[root@hdss7-21 ~]# yum install -y iptables-services
+[root@hdss7-21 ~]# systemctl start iptables.service ; systemctl enable iptables.service
+# 需要处理的规则：
+[root@hdss7-21 ~]# iptables-save |grep POSTROUTING|grep docker
+-A POSTROUTING -s 172.7.21.0/24 ! -o docker0 -j MASQUERADE
+[root@hdss7-21 ~]# iptables-save | grep -i reject
+-A INPUT -j REJECT --reject-with icmp-host-prohibited
+-A FORWARD -j REJECT --reject-with icmp-host-prohibited
+# 处理方式：
+[root@hdss7-21 ~]# iptables -t nat -D POSTROUTING -s 172.7.21.0/24 ! -o docker0 -j MASQUERADE
+[root@hdss7-21 ~]# iptables -t nat -I POSTROUTING -s 172.7.21.0/24 ! -d 172.7.0.0/16 ! -o docker0 -j MASQUERADE
+
+[root@hdss7-21 ~]# iptables -t filter -D INPUT -j REJECT --reject-with icmp-host-prohibited
+[root@hdss7-21 ~]# iptables -t filter -D FORWARD -j REJECT --reject-with icmp-host-prohibited
+
+[root@hdss7-21 ~]# iptables-save > /etc/sysconfig/iptables
+```
+
+```
+# 此时跨宿主机访问pod时，显示pod的IP
+[root@nginx-ds-jdp7q /]# tail -f /usr/local/nginx/logs/access.log  
+172.7.22.2 - - [13/Jan/2020:14:15:39 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/7.29.0"
+172.7.22.2 - - [13/Jan/2020:14:15:47 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/7.29.0"
+172.7.22.2 - - [13/Jan/2020:14:15:48 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/7.29.0"
+172.7.22.2 - - [13/Jan/2020:14:15:48 +0000] "HEAD / HTTP/1.1" 200 0 "-" "curl/7.29.0"
+```
+
+### 5.2. CoreDNS
+
+CoreDNS用于实现 service --> cluster IP 的DNS解析。以容器的方式交付到k8s集群，由k8s自行管理，降低人为操作的复杂度。
+
+#### 5.2.1. 配置yaml文件库
+
+在hdss7-200中配置yaml文件库，后期通过Http方式去使用yaml清单文件。
+
+- 配置nginx虚拟主机( hdss7-200 )
+
+```
+[root@hdss7-200 ~]# vim /etc/nginx/conf.d/k8s-yaml.od.com.conf
+server {
+    listen       80;
+    server_name  k8s-yaml.od.com;
+
+    location / {
+        autoindex on;
+        default_type text/plain;
+        root /data/k8s-yaml;
+    }
+}
+[root@hdss7-200 ~]# mkdir /data/k8s-yaml;
+[root@hdss7-200 ~]# nginx -qt && nginx -s reload
+```
+
+- 配置dns解析(hdss7-11)
+
+```
+[root@hdss7-11 ~]# vim /var/named/od.com.zone 
+[root@hdss7-11 ~]# cat /var/named/od.com.zone
+$ORIGIN od.com.
+$TTL 600    ; 10 minutes
+@           IN SOA  dns.od.com. dnsadmin.od.com. (
+                2020011301 ; serial
+                10800      ; refresh (3 hours)
+                900        ; retry (15 minutes)
+                604800     ; expire (1 week)
+                86400      ; minimum (1 day)
+                )
+                NS   dns.od.com.
+$TTL 60 ; 1 minute
+dns                A    10.4.7.11
+harbor             A    10.4.7.200
+k8s-yaml           A    10.4.7.200
+[root@hdss7-11 ~]# systemctl restart named
+```
+
+#### 5.2.2. coredns的资源清单文件
+
+清单文件存放到 hdss7-200:/data/k8s-yaml/coredns/coredns_1.6.1/
+
+- rabc.yaml
+
+```
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+      kubernetes.io/cluster-service: "true"
+      addonmanager.kubernetes.io/mode: Reconcile
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    kubernetes.io/bootstrapping: rbac-defaults
+    addonmanager.kubernetes.io/mode: Reconcile
+  name: system:coredns
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - endpoints
+  - services
+  - pods
+  - namespaces
+  verbs:
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  labels:
+    kubernetes.io/bootstrapping: rbac-defaults
+    addonmanager.kubernetes.io/mode: EnsureExists
+  name: system:coredns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:coredns
+subjects:
+- kind: ServiceAccount
+  name: coredns
+  namespace: kube-system
+```
+
+- configmap.yaml
+
+```
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        log
+        health
+        ready
+        kubernetes cluster.local 192.168.0.0/16
+        forward . 10.4.7.11
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+```
+
+- deployment.yaml
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    k8s-app: coredns
+    kubernetes.io/name: "CoreDNS"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: coredns
+  template:
+    metadata:
+      labels:
+        k8s-app: coredns
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: coredns
+      containers:
+      - name: coredns
+        image: harbor.od.com/public/coredns:v1.6.1
+        args:
+        - -conf
+        - /etc/coredns/Corefile
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/coredns
+        ports:
+        - containerPort: 53
+          name: dns
+          protocol: UDP
+        - containerPort: 53
+          name: dns-tcp
+          protocol: TCP
+        - containerPort: 9153
+          name: metrics
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 5
+      dnsPolicy: Default
+      volumes:
+        - name: config-volume
+          configMap:
+            name: coredns
+            items:
+            - key: Corefile
+              path: Corefile
+```
+
+- service.yaml
+
+```
+apiVersion: v1
+kind: Service
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    k8s-app: coredns
+    kubernetes.io/cluster-service: "true"
+    kubernetes.io/name: "CoreDNS"
+spec:
+  selector:
+    k8s-app: coredns
+  clusterIP: 192.168.0.2
+  ports:
+  - name: dns
+    port: 53
+    protocol: UDP
+  - name: dns-tcp
+    port: 53
+  - name: metrics
+    port: 9153
+    protocol: TCP
+```
+
+#### 5.2.3. 交付coredns到K8s
+
+```
+# 准备镜像
+[root@hdss7-200 ~]# docker pull coredns/coredns:1.6.1
+[root@hdss7-200 ~]# docker image tag coredns/coredns:1.6.1 harbor.od.com/public/coredns:v1.6.1
+[root@hdss7-200 ~]# docker image push harbor.od.com/public/coredns:v1.6.1
+```
+
+```
+# 交付coredns
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/coredns/coredns_1.6.1/rbac.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/coredns/coredns_1.6.1/configmap.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/coredns/coredns_1.6.1/deployment.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/coredns/coredns_1.6.1/service.yaml
+[root@hdss7-21 ~]# kubectl get all -n kube-system -o wide
+NAME                           READY   STATUS    RESTARTS   AGE   IP           NODE                NOMINATED NODE   READINESS GATES
+pod/coredns-6b6c4f9648-4vtcl   1/1     Running   0          38s   172.7.21.3   hdss7-21.host.com   <none>           <none>
+
+NAME              TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)                  AGE   SELECTOR
+service/coredns   ClusterIP   192.168.0.2   <none>        53/UDP,53/TCP,9153/TCP   29s   k8s-app=coredns
+
+NAME                      READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                SELECTOR
+deployment.apps/coredns   1/1     1            1           39s   coredns      harbor.od.com/public/coredns:v1.6.1   k8s-app=coredns
+
+NAME                                 DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES                                SELECTOR
+replicaset.apps/coredns-6b6c4f9648   1         1         1       39s   coredns      harbor.od.com/public/coredns:v1.6.1   k8s-app=coredns,pod-template-hash=6b6c4f9648
+```
+
+#### 5.2.4. 测试dns
+
+```
+# 创建service
+[root@hdss7-21 ~]# kubectl create deployment nginx-web --image=harbor.od.com/public/nginx:src_1.14.2
+[root@hdss7-21 ~]# kubectl expose deployment nginx-web --port=80 --target-port=80 
+[root@hdss7-21 ~]# kubectl get svc
+NAME         TYPE        CLUSTER-IP        EXTERNAL-IP   PORT(S)   AGE
+kubernetes   ClusterIP   192.168.0.1       <none>        443/TCP   8d
+nginx-web    ClusterIP   192.168.164.230   <none>        80/TCP    8s
+# 测试DNS，集群外必须使用FQDN(Fully Qualified Domain Name)，全域名
+[root@hdss7-21 ~]# dig -t A nginx-web.default.svc.cluster.local @192.168.0.2 +short # 内网解析OK
+192.168.164.230
+[root@hdss7-21 ~]# dig -t A www.baidu.com @192.168.0.2 +short # 外网解析OK
+www.a.shifen.com.
+180.101.49.11
+180.101.49.12
+```
+
+### 5.3. Ingress-Controller
+
+service是将一组pod管理起来，提供了一个cluster ip和service name的统一访问入口，屏蔽了pod的ip变化。     ingress 是一种基于七层的流量转发策略，即将符合条件的域名或者location流量转发到特定的service上，而ingress仅仅是一种规则，k8s内部并没有自带代理程序完成这种规则转发。
+
+ingress-controller 是一个代理服务器，将ingress的规则能真正实现的方式，常用的有 nginx,traefik,haproxy。但是在k8s集群中，建议使用traefik，性能比haroxy强大，更新配置不需要重载服务，是首选的ingress-controller。github地址：https://github.com/containous/traefik
+
+#### 5.3.1. 配置traefik资源清单
+
+清单文件存放到 hdss7-200:/data/k8s-yaml/traefik/traefik_1.7.2
+
+- rbac.yaml
+
+```
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traefik-ingress-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: traefik-ingress-controller
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: traefik-ingress-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traefik-ingress-controller
+subjects:
+- kind: ServiceAccount
+  name: traefik-ingress-controller
+  namespace: kube-system
+```
+
+- daemonset.yaml
+
+```
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: traefik-ingress
+  namespace: kube-system
+  labels:
+    k8s-app: traefik-ingress
+spec:
+  template:
+    metadata:
+      labels:
+        k8s-app: traefik-ingress
+        name: traefik-ingress
+    spec:
+      serviceAccountName: traefik-ingress-controller
+      terminationGracePeriodSeconds: 60
+      containers:
+      - image: harbor.od.com/public/traefik:v1.7.2
+        name: traefik-ingress
+        ports:
+        - name: controller
+          containerPort: 80
+          hostPort: 81
+        - name: admin-web
+          containerPort: 8080
+        securityContext:
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - NET_BIND_SERVICE
+        args:
+        - --api
+        - --kubernetes
+        - --logLevel=INFO
+        - --insecureskipverify=true
+        - --kubernetes.endpoint=https://10.4.7.10:7443
+        - --accesslog
+        - --accesslog.filepath=/var/log/traefik_access.log
+        - --traefiklog
+        - --traefiklog.filepath=/var/log/traefik.log
+        - --metrics.prometheus
+```
+
+- service.yaml
+
+```
+kind: Service
+apiVersion: v1
+metadata:
+  name: traefik-ingress-service
+  namespace: kube-system
+spec:
+  selector:
+    k8s-app: traefik-ingress
+  ports:
+    - protocol: TCP
+      port: 80
+      name: controller
+    - protocol: TCP
+      port: 8080
+      name: admin-web
+```
+
+- ingress.yaml
+
+```
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: traefik-web-ui
+  namespace: kube-system
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+  - host: traefik.od.com
+    http:
+      paths:
+        - path: /
+        backend:
+          serviceName: traefik-ingress-service
+          servicePort: 8080
+```
+
+- 准备镜像
+
+```
+[root@hdss7-200 traefik_1.7.2]# docker pull traefik:v1.7.2-alpine
+[root@hdss7-200 traefik_1.7.2]# docker image tag traefik:v1.7.2-alpine harbor.od.com/public/traefik:v1.7.2
+[root@hdss7-200 traefik_1.7.2]# docker push harbor.od.com/public/traefik:v1.7.2
+```
+
+#### 5.3.2. 交付traefik到k8s
+
+```
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/traefik/traefik_1.7.2/rbac.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/traefik/traefik_1.7.2/daemonset.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/traefik/traefik_1.7.2/service.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/traefik/traefik_1.7.2/ingress.yaml
+```
+
+```
+[root@hdss7-21 ~]# kubectl get pods -n kube-system -o wide
+NAME                       READY   STATUS    RESTARTS   AGE   IP           NODE                NOMINATED NODE   READINESS GATES
+coredns-6b6c4f9648-4vtcl   1/1     Running   1          24h   172.7.21.3   hdss7-21.host.com   <none>           <none>
+traefik-ingress-4gm4w      1/1     Running   0          77s   172.7.21.5   hdss7-21.host.com   <none>           <none>
+traefik-ingress-hwr2j      1/1     Running   0          77s   172.7.22.3   hdss7-22.host.com   <none>           <none>
+[root@hdss7-21 ~]# kubectl get ds -n kube-system 
+NAME              DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+traefik-ingress   2         2         2       2            2           <none>          107s
+```
+
+#### 5.3.3. 配置外部nginx负载均衡
+
+- 在hdss7-11,hdss7-12 配置nginx L7转发
+
+```
+[root@hdss7-11 ~]# vim /etc/nginx/conf.d/od.com.conf
+server {
+    server_name *.od.com;
+  
+    location / {
+        proxy_pass http://default_backend_traefik;
+        proxy_set_header Host       $http_host;
+        proxy_set_header x-forwarded-for $proxy_add_x_forwarded_for;
+    }
+}
+
+upstream default_backend_traefik {
+    # 所有的nodes都放到upstream中
+    server 10.4.7.21:81    max_fails=3 fail_timeout=10s;
+    server 10.4.7.22:81    max_fails=3 fail_timeout=10s;
+}
+[root@hdss7-11 ~]# nginx -tq && nginx -s reload
+```
+
+- 配置dns解析
+
+```
+[root@hdss7-11 ~]# vim /var/named/od.com.zone 
+$ORIGIN od.com.
+$TTL 600    ; 10 minutes
+@           IN SOA  dns.od.com. dnsadmin.od.com. (
+                2020011302 ; serial
+                10800      ; refresh (3 hours)
+                900        ; retry (15 minutes)
+                604800     ; expire (1 week)
+                86400      ; minimum (1 day)
+                )
+                NS   dns.od.com.
+$TTL 60 ; 1 minute
+dns                A    10.4.7.11
+harbor             A    10.4.7.200
+k8s-yaml           A    10.4.7.200
+traefik            A    10.4.7.10
+[root@hdss7-11 ~]# systemctl restart named
+```
+
+- 查看traefik网页
+
+![image.png](https://cdn.nlark.com/yuque/0/2020/png/378176/1579050755390-6876047c-614f-4f23-8c47-6c5f35c58897.png?x-oss-process=image%2Fwatermark%2Ctype_d3F5LW1pY3JvaGVp%2Csize_10%2Ctext_TGludXgt5rih5rih6bif%2Ccolor_FFFFFF%2Cshadow_50%2Ct_80%2Cg_se%2Cx_10%2Cy_10%2Fresize%2Cw_1500)
+
+### 
+
+### 5.4. dashboard
+
+#### 5.4.1. 配置资源清单
+
+清单文件存放到 hdss7-200:/data/k8s-yaml/dashboard/dashboard_1.10.1
+
+- 准备镜像
+
+```
+# 镜像准备       
+# 因不可描述原因，无法访问k8s.gcr.io，改成registry.aliyuncs.com/google_containers
+[root@hdss7-200 ~]# docker image pull registry.aliyuncs.com/google_containers/kubernetes-dashboard-amd64:v1.10.1
+[root@hdss7-200 ~]# docker image tag f9aed6605b81 harbor.od.com/public/kubernetes-dashboard-amd64:v1.10.1
+[root@hdss7-200 ~]# docker image push harbor.od.com/public/kubernetes-dashboard-amd64:v1.10.1
+```
+
+- rbac.yaml
+
+```
+# 当前为dashboard的默认权限
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+    addonmanager.kubernetes.io/mode: Reconcile
+  name: kubernetes-dashboard
+  namespace: kube-system
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+    addonmanager.kubernetes.io/mode: Reconcile
+  name: kubernetes-dashboard-minimal
+  namespace: kube-system
+rules:
+  # Allow Dashboard to get, update and delete Dashboard exclusive secrets.
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["kubernetes-dashboard-key-holder", "kubernetes-dashboard-certs"]
+  verbs: ["get", "update", "delete"]
+  # Allow Dashboard to get and update 'kubernetes-dashboard-settings' config map.
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["kubernetes-dashboard-settings"]
+  verbs: ["get", "update"]
+  # Allow Dashboard to get metrics from heapster.
+- apiGroups: [""]
+  resources: ["services"]
+  resourceNames: ["heapster"]
+  verbs: ["proxy"]
+- apiGroups: [""]
+  resources: ["services/proxy"]
+  resourceNames: ["heapster", "http:heapster:", "https:heapster:"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubernetes-dashboard-minimal
+  namespace: kube-system
+  labels:
+    k8s-app: kubernetes-dashboard
+    addonmanager.kubernetes.io/mode: Reconcile
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubernetes-dashboard-minimal
+subjects:
+- kind: ServiceAccount
+  name: kubernetes-dashboard
+  namespace: kube-system
+```
+
+- deployment.yaml
+
+```
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubernetes-dashboard
+  namespace: kube-system
+  labels:
+    k8s-app: kubernetes-dashboard
+    kubernetes.io/cluster-service: "true"
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-dashboard
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-dashboard
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ''
+    spec:
+      priorityClassName: system-cluster-critical
+      containers:
+      - name: kubernetes-dashboard
+        image: harbor.od.com/public/kubernetes-dashboard-amd64:v1.10.1
+        resources:
+          limits:
+            cpu: 100m
+            memory: 300Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        args:
+          # PLATFORM-SPECIFIC ARGS HERE
+          - --auto-generate-certificates
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            scheme: HTTPS
+            path: /
+            port: 8443
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      serviceAccountName: kubernetes-dashboard
+      tolerations:
+      - key: "CriticalAddonsOnly"
+        operator: "Exists"
+```
+
+- service.yaml
+
+```
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-dashboard
+  namespace: kube-system
+  labels:
+    k8s-app: kubernetes-dashboard
+    kubernetes.io/cluster-service: "true"
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  selector:
+    k8s-app: kubernetes-dashboard
+  ports:
+  - port: 443
+    targetPort: 8443
+```
+
+- ingress.yaml
+
+```
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: kubernetes-dashboard
+  namespace: kube-system
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+  - host: dashboard.od.com
+    http:
+      paths:
+      - backend:
+          serviceName: kubernetes-dashboard
+          servicePort: 443
+```
+
+#### 5.4.2. 交付dashboard到k8s
+
+```
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/dashboard/dashboard_1.10.1/rbac.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/dashboard/dashboard_1.10.1/deployment.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/dashboard/dashboard_1.10.1/service.yaml
+[root@hdss7-21 ~]# kubectl apply -f http://k8s-yaml.od.com/dashboard/dashboard_1.10.1/ingress.yaml
+```
+
+#### 5.4.3. 配置DNS解析
+
+```
+[root@hdss7-11 ~]# vim /var/named/od.com.zone 
+$ORIGIN od.com.
+$TTL 600    ; 10 minutes
+@           IN SOA  dns.od.com. dnsadmin.od.com. (
+                2020011303 ; serial
+                10800      ; refresh (3 hours)
+                900        ; retry (15 minutes)
+                604800     ; expire (1 week)
+                86400      ; minimum (1 day)
+                )
+                NS   dns.od.com.
+$TTL 60 ; 1 minute
+dns                A    10.4.7.11
+harbor             A    10.4.7.200
+k8s-yaml           A    10.4.7.200
+traefik            A    10.4.7.10
+dashboard          A    10.4.7.10
+[root@hdss7-11 ~]# systemctl restart named.service 
+```
+
+#### 5.4.4. 签发SSL证书
+
+```
+[root@hdss7-200 ~]# cd /opt/certs/
+[root@hdss7-200 certs]# (umask 077; openssl genrsa -out dashboard.od.com.key 2048)
+[root@hdss7-200 certs]# openssl req -new -key dashboard.od.com.key -out dashboard.od.com.csr -subj "/CN=dashboard.od.com/C=CN/ST=BJ/L=Beijing/O=OldboyEdu/OU=ops"
+[root@hdss7-200 certs]# openssl x509 -req -in dashboard.od.com.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -out dashboard.od.com.crt -days 3650
+[root@hdss7-200 certs]# ll dashboard.od.com.*
+-rw-r--r-- 1 root root 1196 Jan 29 20:52 dashboard.od.com.crt
+-rw-r--r-- 1 root root 1005 Jan 29 20:51 dashboard.od.com.csr
+-rw------- 1 root root 1675 Jan 29 20:51 dashboard.od.com.key
+[root@hdss7-200 certs]# scp dashboard.od.com.key dashboard.od.com.crt hdss7-11:/etc/nginx/certs/  
+[root@hdss7-200 certs]# scp dashboard.od.com.key dashboard.od.com.crt hdss7-12:/etc/nginx/certs/
+```
+
+#### 5.4.5. 配置Nginx
+
+```
+# hdss7-11和hdss7-12都需要操作
+[root@hdss7-11 ~]# vim /etc/nginx/conf.d/dashborad.conf
+server {
+    listen       80;
+    server_name  dashboard.od.com;
+    rewrite ^(.*)$ https://${server_name}$1 permanent;
+}
+
+server {
+    listen       443 ssl;
+    server_name  dashboard.od.com;
+
+    ssl_certificate "certs/dashboard.od.com.crt";
+    ssl_certificate_key "certs/dashboard.od.com.key";
+    ssl_session_cache shared:SSL:1m;
+    ssl_session_timeout  10m;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    location / {
+        proxy_pass http://default_backend_traefik;
+        proxy_set_header Host       $http_host;
+        proxy_set_header x-forwarded-for $proxy_add_x_forwarded_for;
+    }
+}
+[root@hdss7-11 ~]# nginx -t && nginx -s reload
+```
+
+![image.png](https://cdn.nlark.com/yuque/0/2020/png/378176/1580309290346-edc0545a-f15c-4dd7-a209-e2ebffd63141.png?x-oss-process=image%2Fwatermark%2Ctype_d3F5LW1pY3JvaGVp%2Csize_10%2Ctext_TGludXgt5rih5rih6bif%2Ccolor_FFFFFF%2Cshadow_50%2Ct_80%2Cg_se%2Cx_10%2Cy_10%2Fresize%2Cw_636)
+
+#### 5.4.6. 测试token登陆
+
+```
+[root@hdss7-21 ~]# kubectl get secret -n kube-system|grep kubernetes-dashboard-token
+kubernetes-dashboard-token-hr5rj         kubernetes.io/service-account-token   3      17m
+[root@hdss7-21 ~]# kubectl describe secret kubernetes-dashboard-token-hr5rj -n kube-system|grep ^token
+token:      eyJhbGciOiJSUzI1NiIsImtpZCI6IiJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlLXN5c3RlbSIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZC10b2tlbi1ocjVyaiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJrdWJlcm5ldGVzLWRhc2hib2FyZCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6ImZhNzAxZTRmLWVjMGItNDFkNS04NjdmLWY0MGEwYmFkMjFmNSIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDprdWJlLXN5c3RlbTprdWJlcm5ldGVzLWRhc2hib2FyZCJ9.SDUZEkH_N0B6rjm6bW_jN03F4pHCPafL3uKD2HU0ksM0oenB2425jxvfi16rUbTRCsfcGqYXRrE2x15gpb03fb3jJy-IhnInUnPrw6ZwEdqWagen_Z4tdFhUgCpdjdShHy40ZPfql_iuVKbvv7ASt8w8v13Ar3FxztyDyLScVO3rNEezT7JUqMI4yj5LYQ0IgpSXoH12tlDSTyX8Rk2a_3QlOM_yT5GB_GEZkwIESttQKVr7HXSCrQ2tEdYA4cYO2AbF1NgAo_CVBNNvZLvdDukWiQ_b5zwOiO0cUbbiu46x_p6gjNWzVb7zHNro4gh0Shr4hIhiRQot2DJ-sq94Ag
+```
+
+![image.png](https://cdn.nlark.com/yuque/0/2020/png/378176/1580309446249-862bccaa-f85e-45cf-9cf2-65b15bdded97.png?x-oss-process=image%2Fresize%2Cw_486)
