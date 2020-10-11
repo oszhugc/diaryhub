@@ -2176,3 +2176,1149 @@ POST /_bulk
 
 - 最大的优势在于, 不需要将json数组解析为一个jsonarray对象, 形成一份大数据的拷贝, 浪费内存空间, 尽可能地保证性能. 
 
+
+
+# 10 Mapping映射入门
+
+## 10.1 什么是mapping映射
+
+概念:自动或者手动为index的_doc建立的一种数据结构和相关配置, 简称mapping映射
+
+插入几条数据, 让es自动为我们建立一个索引. 
+
+```
+PUT /website/_doc/1
+{
+  "post_date": "2019-01-01",
+  "title": "my first article",
+  "content": "this is my first article in this website",
+  "author_id": 11400
+}
+
+PUT /website/_doc/2
+{
+  "post_date": "2019-01-02",
+  "title": "my second article",
+  "content": "this is my second article in this website",
+  "author_id": 11400
+}
+ 
+PUT /website/_doc/3
+{
+  "post_date": "2019-01-03",
+  "title": "my third article",
+  "content": "this is my third article in this website",
+  "author_id": 11400
+}
+```
+
+对比数据库建表语句
+
+```
+create table website(
+     post_date date,
+     title varchar(50),     
+     content varchar(100),
+     author_id int(11) 
+ );
+```
+
+动态映射: dynamic mapping. 自动为我们建立index, 以及对应的mapping, mapping中包含了每个field对应的数据类型, 以及如何分词等设置. 
+
+重点:我们当然, 后面会讲解, 也可以手动在创建数据之前, 先创建index, 以及对应的mapping. 
+
+```
+GET  /website/_mapping/
+{
+  "website" : {
+    "mappings" : {
+      "properties" : {
+        "author_id" : {
+          "type" : "long"
+        },
+        "content" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        },
+        "post_date" : {
+          "type" : "date"
+        },
+        "title" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+尝试各种搜索
+
+```
+GET /website/_search?q=2019        0条结果             
+GET /website/_search?q=2019-01-01           1条结果
+GET /website/_search?q=post_date:2019-01-01     1条结果
+GET /website/_search?q=post_date:2019          0 条结果
+```
+
+搜索结果为什么不一致, 因为es自动建立mapping的时候, 设置了不同的field不同的date type. 不同的date type的分词, 搜索等行为是不一样的. 所以出现了_all field和post_date field的搜索表现完全不一样. 
+
+## 10.2 精确匹配与全文搜索的对比分析
+
+### 10.2.1 exact value精确匹配
+
+2019-01-01, exact value, 搜索的时候, 必须输入2019-01-01, 才能搜索出来
+
+如果你输入一个01, 是搜不出来的.
+
+select * from book where name = 'java'
+
+### 10.2.2 full text全文检索
+
+搜"笔记电脑", 笔记本电脑词条会不会出现. 
+
+select * from book where name like '%java%'
+
+- 缩写vs全称
+- 格式转化: like liked, likes
+- 大小写: tom vs Tom
+- 同义词: like vs love 
+
+就不是单纯的只是匹配完整的一个值, 而是可以对值进行拆分词语后(分词)进行匹配, 也可以通过缩写, 时态, 大小写, 同义词等进行匹配, 深入NLP, 自然语言处理. 
+
+## 10.3 全文检索下倒排索引核心原理快速解密
+
+doc1：I really liked my small dogs, and I think my mom also liked them.
+
+doc2：He never liked any dogs, so I hope that my mom will not expect me to liked him.
+
+#### 分词，初步的倒排索引的建立
+
+| term       | **doc1** | **doc2** |
+| ---------- | -------- | -------- |
+| **I**      | *        | *        |
+| **really** | *        |          |
+| **liked**  | *        | *        |
+| **my**     | *        | *        |
+| **small**  | *        |          |
+| **dogs**   | *        |          |
+| **and**    | *        |          |
+| **think**  | *        |          |
+| **mom**    | *        | *        |
+| **also**   | *        |          |
+| **them**   | *        |          |
+| **He**     |          | *        |
+| **never**  |          | *        |
+| **any**    |          | *        |
+| **so**     |          | *        |
+| **hope**   |          | *        |
+| **that**   |          | *        |
+| **will**   |          | *        |
+| **not**    |          | *        |
+| **expect** |          | *        |
+| **me**     |          | *        |
+| **to**     |          | *        |
+| **him**    |          | *        |
+
+演示了一下倒排索引最简单的建立的一个过程
+
+#### 搜索
+
+mother like little dog，不可能有任何结果
+
+mother
+
+like
+
+little
+
+dog
+
+这不是我们想要的结果。同义词mom\mother在我们人类看来是一样。想进行标准化操作。
+
+#### 重建倒排索引
+
+normalization正规化，建立倒排索引的时候，会执行一个操作，也就是说对拆分出的各个单词进行相应的处理，以提升后面搜索的时候能够搜索到相关联的文档的概率
+
+时态的转换，单复数的转换，同义词的转换，大小写的转换
+
+mom ―> mother
+
+liked ―> like
+
+small ―> little
+
+dogs ―> dog
+
+重新建立倒排索引，加入normalization，再次用mother liked little dog搜索，就可以搜索到了
+
+| **word**   | **doc1** | **doc2** | **normalization** |
+| ---------- | -------- | -------- | ----------------- |
+| **I**      | *        | *        |                   |
+| **really** | *        |          |                   |
+| **like**   | *        | *        | liked ―> like     |
+| **my**     | *        | *        |                   |
+| **little** | *        |          | small ―> little   |
+| **dog**    | *        |          | dogs ―> dog       |
+| **and**    | *        |          |                   |
+| **think**  | *        |          |                   |
+| **mother** | *        | *        | mom ―> mother     |
+| **also**   | *        |          |                   |
+| **them**   | *        |          |                   |
+| **He**     |          | *        |                   |
+| **never**  |          | *        |                   |
+| **any**    |          | *        |                   |
+| **so**     |          | *        |                   |
+| **hope**   |          | *        |                   |
+| **that**   |          | *        |                   |
+| **will**   |          | *        |                   |
+| **not**    |          | *        |                   |
+| **expect** |          | *        |                   |
+| **me**     |          | *        |                   |
+| **to**     |          | *        |                   |
+| **him**    |          | *        |                   |
+
+#### 重新搜索
+
+搜索：mother liked  little dog，
+
+ 对搜索条件经行分词 normalization
+
+mother 
+
+liked  -》like
+
+ little 
+
+dog
+
+
+
+doc1和doc2都会搜索出来
+
+
+
+## 10.4 分词器 analyzer
+
+### 10.4.1 什么是分词器 analyzer
+
+作用: 切分词语, normalization(提升recall召回率)
+
+给你一个句子, 然后将这段句子拆分成一个一个的单个词语, 同时对每个单词进行normalization(时态转换, 单复数转化)
+
+recall 召回率: 搜索的时候, 增加能够搜索到的结果的数量
+
+analyzer组成部分: 
+
+1. character filter:在一段文本进行分词之前, 先进行预处理, 比如最常见的就是, 过滤html标签
+2. tokenizer: 分词
+3. token filter:lowercase, stop word, synonymon,
+
+一个分词器, 很重要, 将一段文本进行各种处理, 最后处理好的结果才会拿去建立倒排索引
+
+### 10.4.2 内置分词器的介绍
+
+例句：Set the shape to semi-transparent by calling set_trans(5)
+
+ 
+
+standard analyzer标准分词器：set, the, shape, to, semi, transparent, by, calling, set_trans, 5（默认的是standard）
+
+simple analyzer简单分词器：set, the, shape, to, semi, transparent, by, calling, set, trans
+
+whitespace analyzer：Set, the, shape, to, semi-transparent, by, calling, set_trans(5)
+
+language analyzer（特定的语言的分词器，比如说，english，英语分词器）：set, shape, semi, transpar, call, set_tran, 5
+
+
+
+## 10.5 query string根据字段分词策略
+
+### 10.5.1 query string分词
+
+query string必须以和index建立时相同的analyzer进行分词
+
+query string对exact value和full-text的区别对待
+
+### 10.5.2 测试分词器
+
+``` 
+GET /_analyze
+{
+  "analyzer": "standard",
+  "text": "Text to analyze 80"
+}
+```
+
+返回值:
+
+```
+{
+  "tokens" : [
+    {
+      "token" : "text",
+      "start_offset" : 0,
+      "end_offset" : 4,
+      "type" : "<ALPHANUM>",
+      "position" : 0
+    },
+    {
+      "token" : "to",
+      "start_offset" : 5,
+      "end_offset" : 7,
+      "type" : "<ALPHANUM>",
+      "position" : 1
+    },
+    {
+      "token" : "analyze",
+      "start_offset" : 8,
+      "end_offset" : 15,
+      "type" : "<ALPHANUM>",
+      "position" : 2
+    },
+    {
+      "token" : "80",
+      "start_offset" : 16,
+      "end_offset" : 18,
+      "type" : "<NUM>",
+      "position" : 3
+    }
+  ]
+}
+```
+
+- token: 实际存储的term关键字
+- position:在此词条在原文本中的位置
+- start_offset/end_offset字符在原始字符串中的位置
+
+## 10.6 mapping回顾总结
+
+- 往es里面直接插入数据, es会自动建立索引, 同时建立对应的mapping(dynamic mapping)
+- mapping中就自耦东定义了每个field的数据类型
+- 不同的数据类型(比如说text和date), 可能有的是exact value, 有的是full text
+- exact value, 在建立倒排所以看的时候, 分词的时候, 是将整个值一起作为一个关键词建立倒排索引中的;full text field进行搜索的行为也是不一样的, 会跟建立倒排索引的行为保持一致; 比如说exact value搜索的时候, 就是直接按照整个值进行匹配, full text query string, 也会进行分词和normalization, 再去倒排索引中去搜索
+- 可以用es的dynamic mapping, 让其自动建立mapping, 包括自动设置数据类型; 也可以提前手动创建index和mapping, 自己对各个field进行设置, 包括数据类型, 包括索引行为, 包括分词器等. 
+
+## 10.7 mapping的核心数据类型以及dynamic mapping
+
+### 10.7.1 核心的数据类型
+
+string: text and keyword
+
+byte, short, integer, long, float, double 
+
+boolean 
+
+date 
+
+### 10.7.2 dynamic mapping推测规则
+
+true or false   --> boolean
+
+123     --> long
+
+123.45      --> double
+
+2019-01-01  --> date
+
+"hello world"   --> text/keywod
+
+### 10.7.3 查看mapping
+
+GET /index/_mapping/
+
+## 10.8 手动管理mapping
+
+### 10.8.1 查询所有索引的映射
+
+GET /_mapping
+
+### 10.8.2 创建映射!!!
+
+创建索引后,应该立即手动创建映射
+
+``` 
+PUT book/_mapping
+{
+	"properties": {
+           "name": {
+                  "type": "text"
+            },
+           "description": {
+              "type": "text",
+              "analyzer":"english",
+              "search_analyzer":"english"
+           },
+           "pic":{
+             "type":"text",
+             "index":false
+           },
+           "studymodel":{
+             "type":"text"
+           }
+    }
+}
+```
+
+**Text文本类型:**
+
+- analyzer
+
+  通过analyzer属性指定分词器
+
+  上边指定了analyzer是指在索引和搜索都使用english, 如果单独想定义搜索时使用的分词器则可以通过search_analyzer属性
+
+- index
+
+  index属性指定是否索引
+
+  默认index=true, 即要进行索引, 只有进行索引才可以从索引库搜索到
+
+  但是也有一些内容不需要索引, 比如: 商品图片地址只被用来展示图片, 不进行搜索图片, 此时可以将index设置为false.
+
+  删除索引, 重新创建映射, 将pic的index设置为false, 尝试根据pic去搜索, 结果搜索不到结果.
+
+- store
+
+- 是否在source之外存储, 每个文档索引后会在es中保存一份原始文档, 存放在"source"中, 一般情况下不需要设置store为true, 因为在source中已经有一份原始文档了
+
+测试
+
+```
+PUT book/_mapping
+{
+		"properties": {
+           "name": {
+                  "type": "text"
+            },
+           "description": {
+              "type": "text",
+              "analyzer":"english",
+              "search_analyzer":"english"
+           },
+           "pic":{
+             "type":"text",
+             "index":false
+           },
+           "studymodel":{
+             "type":"text"
+           }
+    }
+}
+```
+
+插入文档: 
+
+```
+PUT /book/_doc/1
+{
+  "name":"Bootstrap开发框架",
+  "description":"Bootstrap是由Twitter推出的一个前台页面开发框架，在行业之中使用较为广泛。此开发框架包含了大量的CSS、JS程序代码，可以帮助开发者（尤其是不擅长页面开发的程序人员）轻松的实现一个不受浏览器限制的精美界面效果。",
+  "pic":"group1/M00/00/01/wKhlQFqO4MmAOP53AAAcwDwm6SU490.jpg",
+  "studymodel":"201002"
+}
+```
+
+Get /book/_search?q=name:开发
+
+Get  /book/_search?q=description:开发
+
+Get /book/_search?q=pic:group1/M00/00/01/wKhlQFqO4MmAOP53AAAcwDwm6SU490.jpg
+
+Get /book/_search?q=studymodel:201002
+
+通过测试发现：name和description都支持全文检索，pic不可作为查询条件。
+
+**keyword关键字字段**
+
+目前已经取代了"index":false. 上面介绍的text文本字段在映射时需要设置分词器, keyword字段为关键字字段, 通常搜索keyword是按照整体搜索, 所以创建keyword字段的索引时是不进行分词的. 比如: 邮政编码, 手机号, 身份证号等, keyword字段通常用于过滤, 排序,, 聚合等. 
+
+**date日期类型**
+
+日期类型不用设置分词器
+
+通常日期类型的字段用于排序
+
+format 
+
+通过format设置日期格式
+
+例子:
+
+下边的设置允许date字段存储年月日时分秒, 年月日及毫秒三种格式
+
+```
+{
+  "properties": {
+      "timestamp": {
+       "type":   "date",
+         "format": "yyyy-MM-dd HH:mm:ss||yyyy-MM-dd"
+       }
+      }
+}
+```
+
+插入文档Z:
+
+```
+Post book/doc/3 
+
+{
+ "name": "spring开发基础",
+ "description": "spring 在java领域非常流行，java程序员都在用。",
+ "studymodel": "201001",
+ "pic":"group1/M00/00/01/wKhlQFqO4MmAOP53AAAcwDwm6SU490.jpg",
+ "timestamp":"2018-07-04 18:28:58"
+}
+```
+
+**数值类型**
+
+- 尽量选择范围小的类型, 提高搜索效率
+
+- 对于浮点数尽量用比例因子, 比如一个价格字段, 单位为元, 我们将比例因子设置为100, 这在es中会按分存储, 映射如下:
+
+  ```
+  "price": {
+          "type": "scaled_float",
+          "scaling_factor": 100
+    },
+  ```
+
+  由于比例因子为100, 如果我们输入的价格是23.45,则es中会将23.45乘以100存储在es中
+
+  如果输入的价格是23.456, es会将23.456乘以100再取一个接近原始值的数, 得出2346
+
+  使用比例因子的好处是整形比浮点数更容易压缩,节省磁盘空间
+
+  如果比例因子不合适, 则从下表选择范围去使用
+
+  更新已有映射, 并插入文档
+
+  ```
+  PUT book/doc/3
+  {
+  "name": "spring开发基础",
+  "description": "spring 在java领域非常流行，java程序员都在用。",
+  "studymodel": "201001",
+   "pic":"group1/M00/00/01/wKhlQFqO4MmAOP53AAAcwDwm6SU490.jpg",
+   "timestamp":"2018-07-04 18:28:58",
+   "price":38.6
+  }
+  ```
+
+### 10.8.3 修改映射
+
+只能创建index时手动建立mapping, 或者新增field mapping, 但是不能update mapping. 
+
+因为已有数据按照映射早已分词存储好, 如果修改, 那这些存量数据怎么办
+
+新增一个字段的mapping
+
+```
+PUT /book/_mapping/
+{
+  "properties" : {
+    "new_field" : {
+      "type" :    "text",
+     "index":    "false"
+    }
+  }
+}
+```
+
+如果修改mapping, 会报错
+
+```
+PUT /book/_mapping/
+{
+  "properties" : {
+    "studymodel" : {
+     "type" :    "keyword"
+    }
+  }
+}
+```
+
+返回: 
+
+```
+{
+  "error": {
+    "root_cause": [
+      {
+        "type": "illegal_argument_exception",
+        "reason": "mapper [studymodel] of different type, current_type [text], merged_type [keyword]"
+      }
+    ],
+    "type": "illegal_argument_exception",
+    "reason": "mapper [studymodel] of different type, current_type [text], merged_type [keyword]"
+  },
+  "status": 400
+}
+```
+
+
+
+### 10.8.4 删除映射
+
+通过删除索引来删除映射
+
+## 10.9 复杂数据类型
+
+### 10.9.1 multivalue field
+
+{ "tags": [ "tag1", "tag2" ]}
+
+建立索引时与string是一样的，数据类型不能混
+
+### 10.9.2 empty field 
+
+null，[]，[null]
+
+### 10.9.3 object field 
+
+```
+PUT /company/_doc/1
+{
+  "address": {
+    "country": "china",
+    "province": "guangdong",
+    "city": "guangzhou"
+  },
+  "name": "jack",
+  "age": 27,
+  "join_date": "2019-01-01"
+}
+```
+
+address: object类型
+
+查询映射:
+
+```
+GET /company/_mapping
+{
+  "company" : {
+    "mappings" : {
+      "properties" : {
+        "address" : {
+          "properties" : {
+            "city" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword",
+                  "ignore_above" : 256
+                }
+              }
+            },
+            "country" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword",
+                  "ignore_above" : 256
+                }
+              }
+            },
+            "province" : {
+              "type" : "text",
+              "fields" : {
+                "keyword" : {
+                  "type" : "keyword",
+                  "ignore_above" : 256
+                }
+              }
+            }
+          }
+        },
+        "age" : {
+          "type" : "long"
+        },
+        "join_date" : {
+          "type" : "date"
+        },
+        "name" : {
+          "type" : "text",
+          "fields" : {
+            "keyword" : {
+              "type" : "keyword",
+              "ignore_above" : 256
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+object
+
+```
+{
+  "address": {
+    "country": "china",
+    "province": "guangdong",
+    "city": "guangzhou"
+  },
+  "name": "jack",
+  "age": 27,
+  "join_date": "2017-01-01"
+}
+```
+
+底层存储格式
+
+```
+{
+    "name":            [jack],
+    "age":          [27],
+    "join_date":      [2017-01-01],
+    "address.country":         [china],
+    "address.province":   [guangdong],
+    "address.city":  [guangzhou]
+}
+```
+
+对象数组：
+
+```
+{
+    "authors": [
+        { "age": 26, "name": "Jack White"},
+        { "age": 55, "name": "Tom Jones"},
+        { "age": 39, "name": "Kitty Smith"}
+    ]
+}
+```
+
+存储格式：
+
+```
+{
+    "authors.age":    [26, 55, 39],
+    "authors.name":   [jack, white, tom, jones, kitty, smith]
+}
+```
+
+
+
+# 11 索引index入门
+
+## 11.1 索引管理
+
+### 11.1.1 为什么我们要手动创建索引
+
+直接put数据, PUT index/_doc/1, es会自动生成索引, 并建立动态映射dynamic mapping. 
+
+在生产上, 我们需要手动建立索引和映射, 为了更好地管理索引. 就像数据库的建表语句一样. 
+
+### 11.1.2 索引管理
+
+#### 创建索引
+
+创建索引的语法:
+
+```
+PUT /index
+{
+    "settings": { ... any settings ... },
+    "mappings": {
+       "properties" : {
+            "field1" : { "type" : "text" }
+        }
+    },
+    "aliases": {
+    	"default_index": {}
+  } 
+}
+```
+
+举例: 
+
+```
+PUT /my_index
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 1
+  },
+  "mappings": {
+    "properties": {
+      "field1":{
+        "type": "text"
+      },
+      "field2":{
+        "type": "text"
+      }
+    }
+  },
+  "aliases": {
+    "default_index": {}
+  } 
+}
+```
+
+**索引别名**
+
+插入数据
+
+```
+POST /my_index/_doc/1
+{
+	"field1":"java",
+	"field2":"js"
+}
+```
+
+查询数据 都可以查到
+
+GET /my_index/_doc/1
+
+GET /default_index/_doc/1
+
+#### 查询索引
+
+GET /my_index/_mapping
+
+GET /my_index/_setting
+
+#### 修改索引
+
+修改副本数
+
+```
+PUT /my_index/_settings
+{
+    "index" : {
+        "number_of_replicas" : 2
+    }
+}
+```
+
+#### 删除索引
+
+DELETE /my_index
+
+DELETE /index_one,index_two
+
+DELETE /index_*
+
+DELETE /_all
+
+
+
+为了安全起见，防止恶意删除索引，删除时必须指定索引名：
+
+elasticsearch.yml
+
+action.destructive_requires_name: true
+
+
+
+## 11.2 定制分词器
+
+### 11.2.1 默认的分词器
+
+standard
+
+分词三个组件: character filter, tokenizer, token filter
+
+standard tokener: 以单词边界进行切分
+
+standard token filter: 什么都不做
+
+lowercase token filter: 将所有字母转换为小写
+
+stop token filter(默认被禁用): 移除停用词, 比如a the it等等
+
+### 11.2.2 修改分词器的设置
+
+启用English停用词token filter
+
+```
+PUT /my_index
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "es_std": {
+          "type": "standard",
+          "stopwords": "_english_"
+        }
+      }
+    }
+  }
+}
+```
+
+测试分词
+
+```
+GET /my_index/_analyze
+{
+  "analyzer": "standard", 
+  "text": "a dog is in the house"
+}
+
+GET /my_index/_analyze
+{
+  "analyzer": "es_std",
+  "text":"a dog is in the house"
+}
+```
+
+### 11.2.3 定制化自己的分词器
+
+```
+PUT /my_index
+{
+  "settings": {
+    "analysis": {
+      "char_filter": {
+        "&_to_and": {
+          "type": "mapping",
+          "mappings": ["&=> and"]
+        }
+      },
+      "filter": {
+        "my_stopwords": {
+          "type": "stop",
+          "stopwords": ["the", "a"]
+        }
+      },
+      "analyzer": {
+        "my_analyzer": {
+          "type": "custom",
+          "char_filter": ["html_strip", "&_to_and"],
+          "tokenizer": "standard",
+          "filter": ["lowercase", "my_stopwords"]
+        }
+      }
+    }
+  }
+}
+```
+
+测试
+
+```
+GET /my_index/_analyze
+{
+  "analyzer": "my_analyzer",
+  "text": "tom&jerry are a friend in the house, <a>, HAHA!!"
+}
+```
+
+设置字段使用自定义分词器
+
+```
+PUT /my_index/_mapping/
+{
+  "properties": {
+    "content": {
+      "type": "text",
+      "analyzer": "my_analyzer"
+    }
+  }
+}
+```
+
+## 11.3 type底层结构及弃用的原因'
+
+### 11.3.1 type是什么
+
+type, 是一个index中用来区分类似的数据的, 类似的数据, 但是可能有不同的fields, 而且有不同的属性来控制建立索引, 分词器. 
+
+field的value, 在底层的Lucene中建立索引的时候, 全部是opaque bytes类型, 不区分类型的
+
+Lucene是没有type的概念的, 在document中, 实际上将type作为一个document的field来处处的. 即 type, es通过type来进行type的过滤和筛选
+
+### 11.3.2 es中不同type存储机制
+
+一个index中的多个type，实际上是放在一起存储的，因此一个index下，不能有多个type重名，而类型或者其他设置不同的，因为那样是无法处理的
+
+```
+{
+   "goods": {
+      "mappings": {
+         "electronic_goods": {
+            "properties": {
+               "name": {
+                  "type": "string",
+               },
+               "price": {
+                  "type": "double"
+               },
+               "service_period": {
+                  "type": "string"
+                   }			
+                }
+         },
+         "fresh_goods": {
+            "properties": {
+               "name": {
+                  "type": "string",
+               },
+               "price": {
+                  "type": "double"
+               },
+               "eat_period": {
+              		"type": "string"
+               }
+                }
+         }
+      }
+   }
+}
+```
+
+```
+PUT /goods/electronic_goods/1
+{
+  "name": "小米空调",
+  "price": 1999.0,
+  "service_period": "one year"
+}
+```
+
+```
+PUT /goods/fresh_goods/1
+{
+  "name": "澳洲龙虾",
+  "price": 199.0,
+  "eat_period": "one week"
+}
+```
+
+es文档在底层的存储是这样子的
+
+```
+{
+   "goods": {
+      "mappings": {
+        "_type": {
+          "type": "string",
+          "index": "false"
+        },
+        "name": {
+          "type": "string"
+        }
+        "price": {
+          "type": "double"
+        }
+        "service_period": {
+          "type": "string"
+        },
+        "eat_period": {
+          "type": "string"
+        }
+      }
+   }
+}
+```
+
+底层数据存储格式
+
+```
+{
+  "_type": "electronic_goods",
+  "name": "小米空调",
+  "price": 1999.0,
+  "service_period": "one year",
+  "eat_period": ""
+}
+```
+
+```
+{
+  "_type": "fresh_goods",
+  "name": "澳洲龙虾",
+  "price": 199.0,
+  "service_period": "",
+  "eat_period": "one week"
+}
+```
+
+### 11.3.3 type弃用
+
+同一索引下，不同type的数据存储其他type的field 大量空值，造成资源浪费。
+
+所以，不同类型数据，要放到不同的索引中。
+
+es9中，将会彻底删除type。
+
+## 11.4.定制dynamic mapping
+
+### 11.4.1 定制dynamic策略
+
+true：遇到陌生字段，就进行dynamic mapping
+
+false：新检测到的字段将被忽略。这些字段将不会被索引，因此将无法搜索，但仍将出现在返回点击的源字段中。这些字段不会添加到映射中，必须显式添加新字段。
+
+strict：遇到陌生字段，就报错
+
+创建mapping
+
+```
+PUT /my_index
+{
+    "mappings": {
+      "dynamic": "strict",
+       "properties": {
+        "title": {
+          "type": "text"
+        },
+        "address": {
+          "type": "object",
+          "dynamic": "true"
+        }
+	    }
+    }
+}
+```
+
+插入数据
+
+```
+PUT /my_index/_doc/1
+{
+  "title": "my article",
+  "content": "this is my article",
+  "address": {
+    "province": "guangdong",
+    "city": "guangzhou"
+  }
+}
+```
+
+报错
+
+```
+{
+  "error": {
+    "root_cause": [
+      {
+        "type": "strict_dynamic_mapping_exception",
+        "reason": "mapping set to strict, dynamic introduction of [content] within [_doc] is not allowed"
+      }
+    ],
+    "type": "strict_dynamic_mapping_exception",
+    "reason": "mapping set to strict, dynamic introduction of [content] within [_doc] is not allowed"
+  },
+  "status": 400
+}
+```
