@@ -3322,3 +3322,892 @@ PUT /my_index/_doc/1
   "status": 400
 }
 ```
+
+### 11.4.2 自定义dynamic mapping策略
+
+es会根据传入的值, 推断类型
+
+**date_detection 日期探测**
+
+默认会按照一定格式识别date, 比如yyyy-MM-dd. 但是如果某个field先过来一个2020-01-01的值, 就会被自动dynamic mapping成date, 后面如果再来一个"hello world"之类的值, 就会报错. 可以手动关闭某个type的date_detection, 如果有需要, 自己手动指定某个field为date类型
+
+```
+PUT /my_index
+{
+    "mappings": {
+      "date_detection": false,
+       "properties": {
+        "title": {
+          "type": "text"
+        },
+        "address": {
+          "type": "object",
+          "dynamic": "true"
+        }
+	    }
+    }
+}
+```
+
+测试
+
+```
+PUT /my_index/_doc/1
+{
+  "title": "my article",
+  "content": "this is my article",
+  "address": {
+    "province": "guangdong",
+    "city": "guangzhou"
+  },
+  "post_date":"2019-09-10"
+}
+```
+
+查看映射
+
+```
+GET /my_index/_mapping
+```
+
+**自定义日期格式**
+
+```
+PUT my_index
+{
+  "mappings": {
+    "dynamic_date_formats": ["MM/dd/yyyy"]
+  }
+}
+```
+
+插入数据
+
+```
+PUT my_index/_doc/1
+{
+  "create_date": "09/25/2019"
+}
+```
+
+**numeric_detection数据探测**
+
+虽然json支持本机浮点和证书数据类型, 但某些应用程序或语言有时可能将数字呈现为字符串. 通常正确的解决方案是显式地映射这些字段, 但是可以启用数字检测(默认情况下禁用)来自耦东完成这些操作. 
+
+```
+PUT my_index
+{
+  "mappings": {
+    "numeric_detection": true
+  }
+}
+```
+
+```
+PUT my_index/_doc/1
+{
+  "my_float":   "1.0", 
+  "my_integer": "1" 
+}
+```
+
+### 11.4.3 定制自己的dynamic mapping template
+
+```
+PUT /my_index
+{
+    "mappings": {
+            "dynamic_templates": [
+                { 
+                  "en": {
+                      "match":              "*_en", 
+                      "match_mapping_type": "string",
+                      "mapping": {
+                          "type":           "text",
+                          "analyzer":       "english"
+                      }
+                }                  
+            }
+        ]
+	}
+}
+```
+
+插入数据
+
+```
+PUT /my_index/_doc/1
+{
+  "title": "this is my first article"
+}
+
+PUT /my_index/_doc/2
+{
+  "title_en": "this is my first article"
+}
+```
+
+搜索
+
+```
+GET my_index/_search?q=first
+GET my_index/_search?q=is
+```
+
+title没有匹配到任何的dynamic模板, 默认就是standard分词器, 不会过滤停用词, is会进入倒排索引, 用is来搜索是可以搜索到的. 
+
+title_en匹配到了dynamic模板, 就是English分词器, 会过滤掉停用词, is这种停用词就会被过滤掉, 用is来搜索就搜索不到了. 
+
+**模板写法**
+
+```
+PUT my_index
+{
+  "mappings": {
+    "dynamic_templates": [
+      {
+        "integers": {
+          "match_mapping_type": "long",
+          "mapping": {
+            "type": "integer"
+          }
+        }
+      },
+      {
+        "strings": {
+          "match_mapping_type": "string",
+          "mapping": {
+            "type": "text",
+            "fields": {
+              "raw": {
+                "type":  "keyword",
+                "ignore_above": 256
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+模板参数
+
+```
+"match":   "long_*",
+"unmatch": "*_text",
+"match_mapping_type": "string",
+"path_match":   "name.*",
+"path_unmatch": "*.middle",
+```
+
+```
+"match_pattern": "regex",
+"match": "^profit_\d+$"
+```
+
+**场景**
+
+1. 结构化搜索
+
+   默认情况下, es将字符串字段映射为带有子关键字字段的文本字段. 但是, 如果只对结构化内容进行索引, 而对全文搜索不感兴趣, 则可以仅将"字段"映射为"关键字". 请注意, 这意味着为了搜索这些字段, 必须搜索索引所用的完全相同的值. 
+
+   ```
+   	{
+           "strings_as_keywords": {
+             "match_mapping_type": "string",
+             "mapping": {
+               "type": "keyword"
+             }
+           }
+         }
+   ```
+
+2. 仅搜索
+
+   与前面的示例相反, 如果您只关心字符串字段的全文检索, 并且不打算对字符串字段运行聚合, 排序或者精确搜索, 您可以告诉es将其映射问文本字段
+
+   ```
+   	{
+           "strings_as_text": {
+             "match_mapping_type": "string",
+             "mapping": {
+               "type": "text"
+             }
+           }
+         }
+   ```
+
+3. norms不关系评分
+
+   norms是指标时间的评价因素. 如果您不关心评分, 例如, 如果您从不按评分对文档进行排序, 则可以在索引中禁用这些评分因子的存储并节省一些空间. 
+
+   ```
+   {
+           "strings_as_keywords": {
+             "match_mapping_type": "string",
+             "mapping": {
+               "type": "text",
+               "norms": false,
+               "fields": {
+                 "keyword": {
+                   "type": "keyword",
+                   "ignore_above": 256
+                 }
+               }
+             }
+           
+   ```
+
+## 11.5 零停机重建索引
+
+### 11.5.1 零停机重建索引
+
+**场景:**
+
+一个field的设置是不能被修改的, 如果要修改一个field, 那么应该重新按照新的mapping, 建立一个index, 然后将数据批量查询出来, 重新用bulk api写入index中. 
+
+批量查询的时候, 建议采用scroll api, 并且采用多线程并发的方式来reindex数据, 每次scoll就查询指定日志的一段数据, 交给一个线程即可. 
+
+1. 一开始, 依靠dynamic mapping, 插入数据, 但是不小心有些数据是2020-01-01这种日期格式的, 所以title这种field被自动映射为了date类型, 实际上它应该是string类型的
+
+   ```
+   PUT /my_index/_doc/1
+   {
+     "title": "2019-09-10"
+   }
+   
+   PUT /my_index/_doc/2
+   {
+     "title": "2019-09-11"
+   }
+   ```
+
+2. 当后面向索引中加入string类型的title值的时候, 就会报错
+
+   ```
+   PUT /my_index/_doc/3
+   {
+     "title": "my first article"
+   }
+   ```
+
+   报错
+
+   ```
+   {
+     "error": {
+       "root_cause": [
+         {
+           "type": "mapper_parsing_exception",
+           "reason": "failed to parse [title]"
+         }
+       ],
+       "type": "mapper_parsing_exception",
+       "reason": "failed to parse [title]",
+       "caused_by": {
+         "type": "illegal_argument_exception",
+         "reason": "Invalid format: \"my first article\""
+       }
+     },
+     "status": 400
+   }
+   ```
+
+3. 如果此时想修改title的类型, 是不可能的
+
+   ```
+   PUT /my_index/_mapping
+   {
+     "properties": {
+       "title": {
+         "type": "text"
+      	}
+     }
+   }
+   ```
+
+   报错
+
+   ```
+   {
+     "error": {
+       "root_cause": [
+         {
+           "type": "illegal_argument_exception",
+           "reason": "mapper [title] of different type, current_type [date], merged_type [text]"
+         }
+       ],
+       "type": "illegal_argument_exception",
+       "reason": "mapper [title] of different type, current_type [date], merged_type [text]"
+     },
+     "status": 400
+   }
+   ```
+
+4. 此时, 唯一的办法, 就是进行reindex, 也就是说, 重新建立一个索引, 将旧索引的数据查出来, 再导入新索引
+
+5. 如果说旧索引的名字, 是old_index, 新索引的名字是new_index, 终端java应用, 已经在使用old_index再操作了, 难道还要去停止java应用, 修改使用的index为new_index, 才重新启动java应用吗? 这个过程中, 就会导致java应用停机, 可用性降低. 
+
+6. 所以说, 给java应用一个别名, 这个别名是指向旧索引的, java应用先用着, java应用先用prod_index alias来操作, 此时实际指向的是旧的my_index.
+
+   ```
+   PUT /my_index/_alias/prod_index
+   ```
+
+7. 新建一个index, 调整期title的类型为string
+
+   ```
+   PUT /my_index_new
+   {
+     "mappings": {
+       "properties": {
+   		"title": {
+            "type": "text"
+           }
+       }
+     }
+   }
+   ```
+
+8. 使用scroll api将数据批量查询出来
+
+   ```
+   GET /my_index/_search?scroll=1m
+   {
+       "query": {
+           "match_all": {}
+       },    
+       "size":  1
+   }
+   ```
+
+   返回
+
+   ```
+   {
+     "_scroll_id": "DnF1ZXJ5VGhlbkZldGNoBQAAAAAAADpAFjRvbnNUWVZaVGpHdklqOV9zcFd6MncAAAAAAAA6QRY0b25zVFlWWlRqR3ZJajlfc3BXejJ3AAAAAAAAOkIWNG9uc1RZVlpUakd2SWo5X3NwV3oydwAAAAAAADpDFjRvbnNUWVZaVGpHdklqOV9zcFd6MncAAAAAAAA6RBY0b25zVFlWWlRqR3ZJajlfc3BXejJ3",
+     "took": 1,
+     "timed_out": false,
+     "_shards": {
+       "total": 5,
+       "successful": 5,
+       "failed": 0
+     },
+     "hits": {
+       "total": 3,
+       "max_score": null,
+       "hits": [
+         {
+           "_index": "my_index",
+           "_type": "my_type",
+           "_id": "1",
+           "_score": null,
+           "_source": {
+             "title": "2019-01-02"
+           },
+           "sort": [
+             0
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+9. 采用bulk api, 将scoll查出来的一批数据, 批量写入新索引
+
+   ```
+   POST /_bulk
+   { "index":  { "_index": "my_index_new", "_id": "1" }}
+   { "title":    "2019-09-10" }
+   ```
+
+10. 返回循环8~9, 查询一批又一批的数据出来, 采用bulk api将每一批数据批量写入新索引
+
+11. 将prod_index alias切换到my_index_new上去, java应用汇直接通过index别名使用新的索引中的数据, java应用程序不需要停机, 零提交, 高可用
+
+    ```
+    POST /_aliases
+    {
+        "actions": [
+            { "remove": { "index": "my_index", "alias": "prod_index" }},
+            { "add":    { "index": "my_index_new", "alias": "prod_index" }}
+        ]
+    }
+    ```
+
+12. 直接通过prod_index别名来查询, 是否ok
+
+    ```
+    GET /prod_index/_search
+    ```
+
+### 11.5.2 生产实践:基于alias对client透明切换index
+
+```
+PUT /my_index_v1/_alias/my_index
+```
+
+client对my_index进行操作
+
+reindex操作, 完成之后, 切换v1到v2
+
+```
+POST /_aliases
+{
+    "actions": [
+        { "remove": { "index": "my_index_v1", "alias": "my_index" }},
+        { "add":    { "index": "my_index_v2", "alias": "my_index" }}
+    ]
+}
+```
+
+# 12 中文分词器 IK分词器
+
+## 12.1 ik分词器安装使用
+
+### 12.1.1 中文分词器
+
+standard分词器, 仅适用于英文
+
+```
+GET /_analyze
+{
+  "analyzer": "standard",
+  "text": "中华人民共和国人民大会堂"
+}
+```
+
+我们想要实现的效果:中华人民共和国, 人民大会堂
+
+Ik分词器就是目前最流行的es中文分词器
+
+### 12.1.2 安装
+
+官网：https://github.com/medcl/elasticsearch-analysis-ik
+
+下载地址：https://github.com/medcl/elasticsearch-analysis-ik/releases
+
+根据es版本下载相应版本包。
+
+解压到 es/plugins/ik中。
+
+重启es
+
+### 12.1.3 ik分词器基础知识
+
+ik_max_word: 会将文本做最细粒度的拆分, 比如会将"中华人民共和国人民大会堂"拆分成"中华人民共和国, 中华人民, 中华, 华人, 人民共和国, 人民大会堂, 人民大会, 大会堂", 会穷尽各种可能的组合. 
+
+ik_smart: 会做最粗粒度的拆分, 比如会将"中华人民共和国人民大会堂"拆分成"中华人共和国, 人民大会堂"
+
+### 12.1.4 ik分词器的使用
+
+存储时, 使用ik_max_word, 搜索时, 使用ik_smart
+
+```
+PUT /my_index 
+{
+  "mappings": {
+      "properties": {
+        "text": {
+          "type": "text",
+          "analyzer": "ik_max_word",
+          "search_analyzer": "ik_smart"
+        }
+      }
+  }
+}
+```
+
+搜索
+
+```
+GET /my_index/_search?q=中华人民共和国人民大会堂
+```
+
+## 12.2 ik配置文件
+
+### 12.2.1 ik配置文件
+
+ik配置文件地址: es/plugins/ik/config目录
+
+- IKAnalyzer.cfg.xml: 用来配置自定义词库
+- main.dic: ik原生内置的中文词库, 总共有27万多条, 只要是这些单词, 都会被分在一起
+- preposition.dic : 介词
+- quantifier.dic : 放一些单位相关的词, 量词
+- suffix.dic : 放了一些后缀
+- surname.dic : 中国的姓氏
+- stopword.dic : 英文停用词
+
+ik原生最重要的两个配置文件
+
+- main.dic :  包含了原生的中文词语, 会按照这个里面的词语去分词
+- stopword.dic :  包含了英文的停用词; 一般像停用词, 会在分词的时候, 直接被干掉, 不会建立在倒排索引中
+
+### 12.2.1 自定义词库
+
+- 自己建立词库
+
+  每年都会涌现出一些特殊的流行词, 网红, 蓝瘦香菇..., 一般不会再ik的原生词典里
+
+  自己不中自己的最新词语, 到ik的词库里面
+
+  IKAnalyzer.cfg.xml :  ext_dict, 创建mydic.dic. 
+
+  补充自己的词语, 然后需要重启es, 才能生效. 
+
+- 自己建立停用词库
+
+  比如 了, 的, 啥, 么..., 我们并不想去建立索引, 让人家搜索
+
+  custom/ext_stopword.dic, 已经有了常用的中文停词, 可以补充自己的停用词, 然后重启es. 
+
+## 12.3 使用mysql热更新 词库
+
+### 12.3.1 热更新
+
+每次都是在es的扩展词典中, 手动添加新词语, 很坑
+
+- 每次添加完, 都要重启es才能生效, 非常麻烦
+- es是分布式的, 可能有数百个节点, 你不能每次都一个一个节点上面去修改
+
+es不停机, 直接我们在外部某个地方添加新词语, es中立即热加载这些词语
+
+热更新方案:
+
+1. 基于ik分词器原生支持的人更新方案, 部署一个web服务器, 提供一个http接口, 通过modified和tag两个http响应头, 来提供词语的热更新
+2. 修改ik分词器源码, 然后手动支持从mysql中每隔一段时间, 自动加载新词库
+
+用第二种方案, 第一种, ik, git社区官方都不建议采用, 觉得不太稳定. 
+
+### 12.3.2 步骤
+
+1. 下载源码
+
+   https://github.com/medcl/elasticsearch-analysis-ik/releases
+
+   ik分词器，是个标准的java maven工程，直接导入eclipse就可以看到源码
+
+2. 修改源码
+
+   org.wltea.analyzer.dic.Dictionary类，160行Dictionary单例类的初始化方法，在这里需要创建一个我们自定义的线程，并且启动它
+
+   org.wltea.analyzer.dic.HotDictReloadThread类：就是死循环，不断调用Dictionary.getSingleton().reLoadMainDict()，去重新加载词典
+
+   Dictionary类，399行：this.loadMySQLExtDict(); 加载mymsql字典。
+
+   Dictionary类，609行：this.loadMySQLStopwordDict();加载mysql停用词
+
+   config下jdbc-reload.properties。mysql配置文件
+
+3. mvn package打包代码
+
+   target\releases\elasticsearch-analysis-ik-7.3.0.zip
+
+4. 解压缩ik压缩包
+
+   将mysql驱动jar, 放入ik的目录下
+
+5. 修改jdbc相关配置
+
+6. 重启es
+
+   观察日志, 日志中就会显示我们打印的那些东西, 比如加载了什么配置, 加载了什么词语, 什么停用词
+
+7. mysql中添加词库和停用词
+
+8. 分词实验, 验证热更新生效
+
+   ```
+   GET /_analyze
+   {
+     "analyzer": "ik_smart",
+     "text": "传智播客"
+   }
+   ```
+
+
+
+# 13 java API实现索引管理
+
+代码
+
+```
+package com.itheima.es;
+
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.admin.indices.alias.Alias;
+import org.elasticsearch.action.admin.indices.close.CloseIndexRequest;
+import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
+import org.elasticsearch.action.admin.indices.open.OpenIndexRequest;
+import org.elasticsearch.action.admin.indices.open.OpenIndexResponse;
+import org.elasticsearch.action.support.ActiveShardCount;
+import org.elasticsearch.action.support.master.AcknowledgedResponse;
+import org.elasticsearch.client.IndicesClient;
+import org.elasticsearch.client.RequestOptions;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.client.indices.CreateIndexRequest;
+import org.elasticsearch.client.indices.CreateIndexResponse;
+import org.elasticsearch.client.indices.GetIndexRequest;
+import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.xcontent.XContentType;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.junit4.SpringRunner;
+
+import java.io.IOException;
+
+/**
+
+- @author Administrator
+
+- @version 1.0
+  **/
+  @SpringBootTest
+  @RunWith(SpringRunner.class)
+  public class TestIndex {
+
+  @Autowired
+  RestHighLevelClient client;
+
+//    @Autowired
+//    RestClient restClient;
+
+​```
+//创建索引
+@Test
+public void testCreateIndex() throws IOException {
+    //创建索引对象
+    CreateIndexRequest createIndexRequest = new CreateIndexRequest("itheima_book");
+    //设置参数
+    createIndexRequest.settings(Settings.builder().put("number_of_shards", "1").put("number_of_replicas", "0"));
+    //指定映射1
+    createIndexRequest.mapping(" {\n" +
+            " \t\"properties\": {\n" +
+            "            \"name\":{\n" +
+            "             \"type\":\"keyword\"\n" +
+            "           },\n" +
+            "           \"description\": {\n" +
+            "              \"type\": \"text\"\n" +
+            "           },\n" +
+            "            \"price\":{\n" +
+            "             \"type\":\"long\"\n" +
+            "           },\n" +
+            "           \"pic\":{\n" +
+            "             \"type\":\"text\",\n" +
+            "             \"index\":false\n" +
+            "           }\n" +
+            " \t}\n" +
+            "}", XContentType.JSON);
+
+    //指定映射2
+​```
+
+//        Map<String, Object> message = new HashMap<>();
+//        message.put("type", "text");
+//        Map<String, Object> properties = new HashMap<>();
+//        properties.put("message", message);
+//        Map<String, Object> mapping = new HashMap<>();
+//        mapping.put("properties", properties);
+//        createIndexRequest.mapping(mapping);
+
+​```
+    //指定映射3
+​```
+
+//        XContentBuilder builder = XContentFactory.jsonBuilder();
+//        builder.startObject();
+//        {
+//            builder.startObject("properties");
+//            {
+//                builder.startObject("message");
+//                {
+//                    builder.field("type", "text");
+//                }
+//                builder.endObject();
+//            }
+//            builder.endObject();
+//        }
+//        builder.endObject();
+//        createIndexRequest.mapping(builder);
+
+​```
+    //设置别名
+    createIndexRequest.alias(new Alias("itheima_index_new"));
+
+    // 额外参数
+    //设置超时时间
+    createIndexRequest.setTimeout(TimeValue.timeValueMinutes(2));
+    //设置主节点超时时间
+    createIndexRequest.setMasterTimeout(TimeValue.timeValueMinutes(1));
+    //在创建索引API返回响应之前等待的活动分片副本的数量，以int形式表示
+    createIndexRequest.waitForActiveShards(ActiveShardCount.from(2));
+    createIndexRequest.waitForActiveShards(ActiveShardCount.DEFAULT);
+
+    //操作索引的客户端
+    IndicesClient indices = client.indices();
+    //执行创建索引库
+    CreateIndexResponse createIndexResponse = indices.create(createIndexRequest, RequestOptions.DEFAULT);
+
+    //得到响应（全部）
+    boolean acknowledged = createIndexResponse.isAcknowledged();
+    //得到响应 指示是否在超时前为索引中的每个分片启动了所需数量的碎片副本
+    boolean shardsAcknowledged = createIndexResponse.isShardsAcknowledged();
+
+    System.out.println("!!!!!!!!!!!!!!!!!!!!!!!!!!!" + acknowledged);
+    System.out.println(shardsAcknowledged);
+
+}
+
+//异步新增索引
+@Test
+public void testCreateIndexAsync() throws IOException {
+    //创建索引对象
+    CreateIndexRequest createIndexRequest = new CreateIndexRequest("itheima_book2");
+    //设置参数
+    createIndexRequest.settings(Settings.builder().put("number_of_shards", "1").put("number_of_replicas", "0"));
+    //指定映射1
+    createIndexRequest.mapping(" {\n" +
+            " \t\"properties\": {\n" +
+            "            \"name\":{\n" +
+            "             \"type\":\"keyword\"\n" +
+            "           },\n" +
+            "           \"description\": {\n" +
+            "              \"type\": \"text\"\n" +
+            "           },\n" +
+            "            \"price\":{\n" +
+            "             \"type\":\"long\"\n" +
+            "           },\n" +
+            "           \"pic\":{\n" +
+            "             \"type\":\"text\",\n" +
+            "             \"index\":false\n" +
+            "           }\n" +
+            " \t}\n" +
+            "}", XContentType.JSON);
+
+    //监听方法
+    ActionListener<CreateIndexResponse> listener =
+            new ActionListener<CreateIndexResponse>() {
+
+                @Override
+                public void onResponse(CreateIndexResponse createIndexResponse) {
+                    System.out.println("!!!!!!!!创建索引成功");
+                    System.out.println(createIndexResponse.toString());
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    System.out.println("!!!!!!!!创建索引失败");
+                    e.printStackTrace();
+                }
+            };
+
+    //操作索引的客户端
+    IndicesClient indices = client.indices();
+    //执行创建索引库
+    indices.createAsync(createIndexRequest, RequestOptions.DEFAULT, listener);
+
+    try {
+        Thread.sleep(5000);
+    } catch (InterruptedException e) {
+        e.printStackTrace();
+    }
+​```
+
+​```
+}
+​```
+
+​```
+//删除索引库
+@Test
+public void testDeleteIndex() throws IOException {
+    //删除索引对象
+    DeleteIndexRequest deleteIndexRequest = new DeleteIndexRequest("itheima_book2");
+    //操作索引的客户端
+    IndicesClient indices = client.indices();
+    //执行删除索引
+    AcknowledgedResponse delete = indices.delete(deleteIndexRequest, RequestOptions.DEFAULT);
+    //得到响应
+    boolean acknowledged = delete.isAcknowledged();
+    System.out.println(acknowledged);
+
+}
+
+//异步删除索引库
+@Test
+public void testDeleteIndexAsync() throws IOException {
+    //删除索引对象
+    DeleteIndexRequest deleteIndexRequest = new DeleteIndexRequest("itheima_book2");
+    //操作索引的客户端
+    IndicesClient indices = client.indices();
+
+    //监听方法
+    ActionListener<AcknowledgedResponse> listener =
+            new ActionListener<AcknowledgedResponse>() {
+                @Override
+                public void onResponse(AcknowledgedResponse deleteIndexResponse) {
+                    System.out.println("!!!!!!!!删除索引成功");
+                    System.out.println(deleteIndexResponse.toString());
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    System.out.println("!!!!!!!!删除索引失败");
+                    e.printStackTrace();
+                }
+            };
+    //执行删除索引
+    indices.deleteAsync(deleteIndexRequest, RequestOptions.DEFAULT, listener);
+
+    try {
+        Thread.sleep(5000);
+    } catch (InterruptedException e) {
+        e.printStackTrace();
+    }
+
+}
+
+// Indices Exists API
+@Test
+public void testExistIndex() throws IOException {
+    GetIndexRequest request = new GetIndexRequest("itheima_book");
+    request.local(false);//从主节点返回本地信息或检索状态
+    request.humanReadable(true);//以适合人类的格式返回结果
+    request.includeDefaults(false);//是否返回每个索引的所有默认设置
+
+    boolean exists = client.indices().exists(request, RequestOptions.DEFAULT);
+    System.out.println(exists);
+}
+​```
+
+​```
+// Indices Open API
+@Test
+public void testOpenIndex() throws IOException {
+    OpenIndexRequest request = new OpenIndexRequest("itheima_book");
+
+    OpenIndexResponse openIndexResponse = client.indices().open(request, RequestOptions.DEFAULT);
+    boolean acknowledged = openIndexResponse.isAcknowledged();
+    System.out.println("!!!!!!!!!"+acknowledged);
+}
+
+// Indices Close API
+@Test
+public void testCloseIndex() throws IOException {
+    CloseIndexRequest request = new CloseIndexRequest("index");
+    AcknowledgedResponse closeIndexResponse = client.indices().close(request, RequestOptions.DEFAULT);
+    boolean acknowledged = closeIndexResponse.isAcknowledged();
+    System.out.println("!!!!!!!!!"+acknowledged);
+
+}
+}
+```
+
+
+
