@@ -4211,3 +4211,1018 @@ public void testCloseIndex() throws IOException {
 
 
 
+# 17 聚合入门
+
+## 17.1 聚合示例
+
+### 17.1.1 需求: 计算每个studymodel下的商品数量
+
+sql语句: select studymodel, count(*) from book group by studymodel
+
+```
+GET /book/_search
+{
+  "size": 0, 
+  "query": {
+    "match_all": {}
+  }, 
+  "aggs": {
+    "group_by_model": {
+      "terms": { "field": "studymodel" }
+    }
+  }
+}
+```
+
+### 17.1.2 需求: 计算每个tags下商品的数量
+
+设置字段"fielddata":true 
+
+```
+PUT /book/_mapping/
+{
+  "properties": {
+    "tags": {
+      "type": "text",
+      "fielddata": true
+    }
+  }
+}
+```
+
+查询:
+
+```
+GET /book/_search
+{
+  "size": 0, 
+  "query": {
+    "match_all": {}
+  }, 
+  "aggs": {
+    "group_by_tags": {
+      "terms": { "field": "tags" }
+    }
+  }
+}
+```
+
+### 17.1.3 需求: 加上搜索条件, 计算每个tags下的商品数量
+
+```
+GET /book/_search
+{
+  "size": 0, 
+  "query": {
+    "match": {
+      "description": "java程序员"
+    }
+  }, 
+  "aggs": {
+    "group_by_tags": {
+      "terms": { "field": "tags" }
+    }
+  }
+}
+```
+
+### 17.1.4 需求: 先分组, 再算每组的平均值, 计算每个tag下的商品的平均价格
+
+```
+GET /book/_search
+{
+    "size": 0,
+    "aggs" : {
+        "group_by_tags" : {
+            "terms" : { 
+              "field" : "tags" 
+            },
+            "aggs" : {
+                "avg_price" : {
+                    "avg" : { "field" : "price" }
+                }
+            }
+        }
+    }
+}
+```
+
+### 17.1.5 需求: 计算每个tag下的商品的平均价格, 并且按照平均价格降序排序
+
+```
+GET /book/_search
+{
+    "size": 0,
+    "aggs" : {
+        "group_by_tags" : {
+            "terms" : { 
+              "field" : "tags",
+              "order": {
+                "avg_price": "desc"
+              }
+            },
+            "aggs" : {
+                "avg_price" : {
+                    "avg" : { "field" : "price" }
+                }
+            }
+        }
+    }
+}
+```
+
+### 17.1.6 需求: 按照指定的价格范围区间进行分组, 然后再每组内再按照tag进行分组, 最后再计算每组的平均价格
+
+```
+GET /book/_search
+{
+  "size": 0,
+  "aggs": {
+    "group_by_price": {
+      "range": {
+        "field": "price",
+        "ranges": [
+          {
+            "from": 0,
+            "to": 40
+          },
+          {
+            "from": 40,
+            "to": 60
+          },
+          {
+            "from": 60,
+            "to": 80
+          }
+        ]
+      },
+      "aggs": {
+        "group_by_tags": {
+          "terms": {
+            "field": "tags"
+          },
+          "aggs": {
+            "average_price": {
+              "avg": {
+                "field": "price"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+## 17.2 两个核心概念: bucket 和 metric 
+
+### 17.2.1 bucket : 一个数据分组
+
+city  name
+        北京 张三
+        北京 李四
+        天津 王五
+        天津 赵六
+
+天津 王麻子
+
+划分出来两个bucket，一个是北京bucket，一个是天津bucket
+北京bucket：包含了2个人，张三，李四
+上海bucket：包含了3个人，王五，赵六，王麻子
+
+### 17.2.2 metric : 对一个数据分组执行的统计
+
+metric, 就是对一个bucket执行的某种聚合分析的操作, 比如说求平均值, 最大值, 最小值
+
+select count(*)
+        from book
+        group studymodel
+
+bucket：group by studymodel --> 那些studymodel相同的数据，就会被划分到一个bucket中
+metric：count(*)，对每个user_id bucket中所有的数据，计算一个数量。还有avg()，sum()，max()，min()
+
+## 17.3 电视案例
+
+创建索引集映射
+
+```
+PUT /tvs
+PUT /tvs/_search
+{			
+			"properties": {
+				"price": {
+					"type": "long"
+				},
+				"color": {
+					"type": "keyword"
+				},
+				"brand": {
+					"type": "keyword"
+				},
+				"sold_date": {
+					"type": "date"
+				}
+			}
+}
+```
+
+插入数据
+
+```
+POST /tvs/_bulk
+{ "index": {}}
+{ "price" : 1000, "color" : "红色", "brand" : "长虹", "sold_date" : "2019-10-28" }
+{ "index": {}}
+{ "price" : 2000, "color" : "红色", "brand" : "长虹", "sold_date" : "2019-11-05" }
+{ "index": {}}
+{ "price" : 3000, "color" : "绿色", "brand" : "小米", "sold_date" : "2019-05-18" }
+{ "index": {}}
+{ "price" : 1500, "color" : "蓝色", "brand" : "TCL", "sold_date" : "2019-07-02" }
+{ "index": {}}
+{ "price" : 1200, "color" : "绿色", "brand" : "TCL", "sold_date" : "2019-08-19" }
+{ "index": {}}
+{ "price" : 2000, "color" : "红色", "brand" : "长虹", "sold_date" : "2019-11-05" }
+{ "index": {}}
+{ "price" : 8000, "color" : "红色", "brand" : "三星", "sold_date" : "2020-01-01" }
+{ "index": {}}
+{ "price" : 2500, "color" : "蓝色", "brand" : "小米", "sold_date" : "2020-02-12" }
+```
+
+### 需求一: 统计哪种颜色的电视销量最高
+
+```
+GET /tvs/_search
+{
+    "size" : 0,
+    "aggs" : { 
+        "popular_colors" : { 
+            "terms" : { 
+              "field" : "color"
+            }
+        }
+    }
+}
+```
+
+查询条件解析
+
+size: 只获取聚合结果, 而不是执行聚合的原始数据
+
+aggs: 固定写法, 要对一份数据执行分组聚合操作
+
+popular_colors: 就是对每个aggs, 都要起一个名字
+
+terms: 根据字段的值进行分组
+
+field: 根据指定的字段的值进行分组
+
+返回:
+
+```
+{
+  "took" : 18,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 8,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [ ]
+  },
+  "aggregations" : {
+    "popular_colors" : {
+      "doc_count_error_upper_bound" : 0,
+      "sum_other_doc_count" : 0,
+      "buckets" : [
+        {
+          "key" : "红色",
+          "doc_count" : 4
+        },
+        {
+          "key" : "绿色",
+          "doc_count" : 2
+        },
+        {
+          "key" : "蓝色",
+          "doc_count" : 2
+        }
+      ]
+    }
+  }
+}
+```
+
+返回结果解析
+
+hits.hits: 我们指定了size是0, 所以hits.hits就是空的
+
+aggregation: 聚合结果
+
+popular_color: 我们指定的某个聚合的名称
+
+buckets: 根据我们指定的field划分出的buckets
+
+key: 每个bucket对应的那个值
+
+doc_count: 这个bucket分组内, 有多少个数据
+
+### 需求二: 统计每种颜色电视平均价格
+
+```
+GET /tvs/_search
+{
+   "size" : 0,
+   "aggs": {
+      "colors": {
+         "terms": {
+            "field": "color"
+         },
+         "aggs": { 
+            "avg_price": { 
+               "avg": {
+                  "field": "price" 
+               }
+            }
+         }
+      }
+   }
+}
+```
+
+在一个aggs执行的bucket操作(terms), 评级的json结构下, 再加一个aggs, 这个第二个aggs内部, 同样取个名字, 执行一个metric操作, avg, 对之前的每个bucket中的数据的指定的field, price field, 求一个平均值
+
+返回: 
+
+```
+{
+  "took" : 4,
+  "timed_out" : false,
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "skipped" : 0,
+    "failed" : 0
+  },
+  "hits" : {
+    "total" : {
+      "value" : 8,
+      "relation" : "eq"
+    },
+    "max_score" : null,
+    "hits" : [ ]
+  },
+  "aggregations" : {
+    "colors" : {
+      "doc_count_error_upper_bound" : 0,
+      "sum_other_doc_count" : 0,
+      "buckets" : [
+        {
+          "key" : "红色",
+          "doc_count" : 4,
+          "avg_price" : {
+            "value" : 3250.0
+          }
+        },
+        {
+          "key" : "绿色",
+          "doc_count" : 2,
+          "avg_price" : {
+            "value" : 2100.0
+          }
+        },
+        {
+          "key" : "蓝色",
+          "doc_count" : 2,
+          "avg_price" : {
+            "value" : 2000.0
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+buckets, 除了key和doc_count
+
+avg_price: 我们自己取的metric aggs的名字
+
+value: 我们的metric计算的结果, 每个bucket中的数据的price字段求平均值的结果
+
+相当于sql: select avg(price) from group by color 
+
+### 需求三: 继续下钻分析
+
+每个颜色下, 平均价格及每个颜色下, 每个品牌的平均价格
+
+```
+GET /tvs/_search 
+{
+  "size": 0,
+  "aggs": {
+    "group_by_color": {
+      "terms": {
+        "field": "color"
+      },
+      "aggs": {
+        "color_avg_price": {
+          "avg": {
+            "field": "price"
+          }
+        },
+        "group_by_brand": {
+          "terms": {
+            "field": "brand"
+          },
+          "aggs": {
+            "brand_avg_price": {
+              "avg": {
+                "field": "price"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 需求四: 更多的metric
+
+count: bucket, terms, 自动就会有一个doc_count, 就相当于是count
+
+avg: avg aggs, 求平均值
+
+max: 求一个bucket内, 指定field值最大的那个数据
+
+min: 求一个bucket内, 指定field值最小的那个数据
+
+sum: 求一个bucket内, 指定field值的总和
+
+```
+GET /tvs/_search
+{
+   "size" : 0,
+   "aggs": {
+      "colors": {
+         "terms": {
+            "field": "color"
+         },
+         "aggs": {
+            "avg_price": { "avg": { "field": "price" } },
+            "min_price" : { "min": { "field": "price"} }, 
+            "max_price" : { "max": { "field": "price"} },
+            "sum_price" : { "sum": { "field": "price" } } 
+         }
+      }
+   }
+}
+```
+
+### 需求五: 划分范围 histogram
+
+```
+GET /tvs/_search
+{
+   "size" : 0,
+   "aggs":{
+      "price":{
+         "histogram":{ 
+            "field": "price",
+            "interval": 2000
+         },
+         "aggs":{
+            "income": {
+               "sum": { 
+                 "field" : "price"
+               }
+             }
+         }
+      }
+   }
+}
+```
+
+histogram: 类似于terms, 也是进行bucket分组操作, 接收一个field, 按照这个field的值的各个范围区间, 进行bucket分组操作
+
+```
+"histogram":{ 
+  "field": "price",
+  "interval": 2000
+}
+```
+
+interval：2000，划分范围，0~2000，2000~4000，4000~6000，6000~8000，8000~10000，buckets
+
+bucket有了之后，一样的，去对每个bucket执行avg，count，sum，max，min，等各种metric操作，聚合分析
+
+### 需求六: 按照日期分组聚合
+
+date_histogram, 按照我们指定的某个date类型的日期field, 以及日期interval, 按照一定的日期间隔, 去划分bucket
+
+min_doc_count: 即使某个日期interval, 2017-01-01~2017-01-31中，一条数据都没有，那么这个区间也是要返回的，不然默认是会过滤掉这个区间的
+
+extended_bounds, min, max: 划分bucket的时候, 会限定在这个起始日期, 和截止日期内. 
+
+```
+GET /tvs/_search
+{
+   "size" : 0,
+   "aggs": {
+      "sales": {
+         "date_histogram": {
+            "field": "sold_date",
+            "interval": "month", 
+            "format": "yyyy-MM-dd",
+            "min_doc_count" : 0, 
+            "extended_bounds" : { 
+                "min" : "2019-01-01",
+                "max" : "2020-12-31"
+            }
+         }
+      }
+   }
+}
+```
+
+### 需求七: 统计每季度每个品牌的销售额
+
+```
+GET /tvs/_search 
+{
+  "size": 0,
+  "aggs": {
+    "group_by_sold_date": {
+      "date_histogram": {
+        "field": "sold_date",
+        "interval": "quarter",
+        "format": "yyyy-MM-dd",
+        "min_doc_count": 0,
+        "extended_bounds": {
+          "min": "2019-01-01",
+          "max": "2020-12-31"
+        }
+      },
+      "aggs": {
+        "group_by_brand": {
+          "terms": {
+            "field": "brand"
+          },
+          "aggs": {
+            "sum_price": {
+              "sum": {
+                "field": "price"
+              }
+            }
+          }
+        },
+        "total_sum_price": {
+          "sum": {
+            "field": "price"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+
+
+# 18 java api实现聚合
+
+简单聚合, 多种聚合, 详见代码
+
+```
+package com.itheima.es;
+
+import org.elasticsearch.action.search.SearchRequest;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.client.RequestOptions;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.aggregations.Aggregation;
+import org.elasticsearch.search.aggregations.AggregationBuilders;
+import org.elasticsearch.search.aggregations.Aggregations;
+import org.elasticsearch.search.aggregations.bucket.histogram.*;
+import org.elasticsearch.search.aggregations.bucket.terms.Terms;
+import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
+import org.elasticsearch.search.aggregations.metrics.*;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.junit4.SpringRunner;
+
+import java.io.IOException;
+import java.util.List;
+
+/**
+ * creste by itheima.itcast
+ */
+@SpringBootTest
+@RunWith(SpringRunner.class)
+public class TestAggs {
+    @Autowired
+    RestHighLevelClient client;
+
+    //需求一：按照颜色分组，计算每个颜色卖出的个数
+    @Test
+    public void testAggs() throws IOException {
+        // GET /tvs/_search
+        // {
+        //     "size": 0,
+        //     "query": {"match_all": {}},
+        //     "aggs": {
+        //       "group_by_color": {
+        //         "terms": {
+        //             "field": "color"
+        //         }
+        //     }
+        // }
+        // }
+
+        //1 构建请求
+        SearchRequest searchRequest=new SearchRequest("tvs");
+
+        //请求体
+        SearchSourceBuilder searchSourceBuilder=new SearchSourceBuilder();
+        searchSourceBuilder.size(0);
+        searchSourceBuilder.query(QueryBuilders.matchAllQuery());
+
+        TermsAggregationBuilder termsAggregationBuilder = AggregationBuilders.terms("group_by_color").field("color");
+        searchSourceBuilder.aggregation(termsAggregationBuilder);
+
+        //请求体放入请求头
+        searchRequest.source(searchSourceBuilder);
+
+        //2 执行
+        SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
+
+        //3 获取结果
+      //   "aggregations" : {
+      //       "group_by_color" : {
+      //           "doc_count_error_upper_bound" : 0,
+      //           "sum_other_doc_count" : 0,
+      //            "buckets" : [
+      //           {
+      //               "key" : "红色",
+      //               "doc_count" : 4
+      //           },
+      //           {
+      //               "key" : "绿色",
+      //                   "doc_count" : 2
+      //           },
+      //           {
+      //               "key" : "蓝色",
+      //                   "doc_count" : 2
+      //           }
+      // ]
+      //       }
+        Aggregations aggregations = searchResponse.getAggregations();
+        Terms group_by_color = aggregations.get("group_by_color");
+        List<? extends Terms.Bucket> buckets = group_by_color.getBuckets();
+        for (Terms.Bucket bucket : buckets) {
+            String key = bucket.getKeyAsString();
+            System.out.println("key:"+key);
+
+            long docCount = bucket.getDocCount();
+            System.out.println("docCount:"+docCount);
+
+            System.out.println("=================================");
+        }
+    }
+
+    // #需求二：按照颜色分组，计算每个颜色卖出的个数，每个颜色卖出的平均价格
+    @Test
+    public void testAggsAndAvg() throws IOException {
+        // GET /tvs/_search
+        // {
+        //     "size": 0,
+        //      "query": {"match_all": {}},
+        //     "aggs": {
+        //     "group_by_color": {
+        //         "terms": {
+        //             "field": "color"
+        //         },
+        //         "aggs": {
+        //             "avg_price": {
+        //                 "avg": {
+        //                     "field": "price"
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        // }
+
+        //1 构建请求
+        SearchRequest searchRequest=new SearchRequest("tvs");
+
+        //请求体
+        SearchSourceBuilder searchSourceBuilder=new SearchSourceBuilder();
+        searchSourceBuilder.size(0);
+        searchSourceBuilder.query(QueryBuilders.matchAllQuery());
+
+        TermsAggregationBuilder termsAggregationBuilder = AggregationBuilders.terms("group_by_color").field("color");
+
+        //terms聚合下填充一个子聚合
+        AvgAggregationBuilder avgAggregationBuilder = AggregationBuilders.avg("avg_price").field("price");
+        termsAggregationBuilder.subAggregation(avgAggregationBuilder);
+
+        searchSourceBuilder.aggregation(termsAggregationBuilder);
+
+        //请求体放入请求头
+        searchRequest.source(searchSourceBuilder);
+
+        //2 执行
+        SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
+
+        //3 获取结果
+        // {
+        //     "key" : "红色",
+        //      "doc_count" : 4,
+        //      "avg_price" : {
+        //        "value" : 3250.0
+        //       }
+        // }
+        Aggregations aggregations = searchResponse.getAggregations();
+        Terms group_by_color = aggregations.get("group_by_color");
+        List<? extends Terms.Bucket> buckets = group_by_color.getBuckets();
+        for (Terms.Bucket bucket : buckets) {
+            String key = bucket.getKeyAsString();
+            System.out.println("key:"+key);
+
+            long docCount = bucket.getDocCount();
+            System.out.println("docCount:"+docCount);
+
+            Aggregations aggregations1 = bucket.getAggregations();
+            Avg avg_price = aggregations1.get("avg_price");
+            double value = avg_price.getValue();
+            System.out.println("value:"+value);
+
+            System.out.println("=================================");
+        }
+    }
+
+    // #需求三：按照颜色分组，计算每个颜色卖出的个数，以及每个颜色卖出的平均值、最大值、最小值、总和。
+    @Test
+    public void testAggsAndMore() throws IOException {
+        // GET /tvs/_search
+        // {
+        //     "size" : 0,
+        //     "aggs": {
+        //      "group_by_color": {
+        //         "terms": {
+        //             "field": "color"
+        //         },
+        //         "aggs": {
+        //             "avg_price": { "avg": { "field": "price" } },
+        //             "min_price" : { "min": { "field": "price"} },
+        //             "max_price" : { "max": { "field": "price"} },
+        //             "sum_price" : { "sum": { "field": "price" } }
+        //         }
+        //     }
+        // }
+        // }
+
+        //1 构建请求
+        SearchRequest searchRequest=new SearchRequest("tvs");
+
+        //请求体
+        SearchSourceBuilder searchSourceBuilder=new SearchSourceBuilder();
+        searchSourceBuilder.size(0);
+        searchSourceBuilder.query(QueryBuilders.matchAllQuery());
+
+        TermsAggregationBuilder termsAggregationBuilder = AggregationBuilders.terms("group_by_color").field("color");
+
+
+        //termsAggregationBuilder里放入多个子聚合
+        AvgAggregationBuilder avgAggregationBuilder = AggregationBuilders.avg("avg_price").field("price");
+        MinAggregationBuilder minAggregationBuilder = AggregationBuilders.min("min_price").field("price");
+        MaxAggregationBuilder maxAggregationBuilder = AggregationBuilders.max("max_price").field("price");
+        SumAggregationBuilder sumAggregationBuilder = AggregationBuilders.sum("sum_price").field("price");
+
+        termsAggregationBuilder.subAggregation(avgAggregationBuilder);
+        termsAggregationBuilder.subAggregation(minAggregationBuilder);
+        termsAggregationBuilder.subAggregation(maxAggregationBuilder);
+        termsAggregationBuilder.subAggregation(sumAggregationBuilder);
+
+
+        searchSourceBuilder.aggregation(termsAggregationBuilder);
+
+        //请求体放入请求头
+        searchRequest.source(searchSourceBuilder);
+
+        //2 执行
+        SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
+
+        //3 获取结果
+        // {
+        //     "key" : "红色",
+        //     "doc_count" : 4,
+        //     "max_price" : {
+        //          "value" : 8000.0
+        //     },
+        //     "min_price" : {
+        //          "value" : 1000.0
+        // },
+        //     "avg_price" : {
+        //         "value" : 3250.0
+        // },
+        //     "sum_price" : {
+        //         "value" : 13000.0
+        // }
+        // }
+        Aggregations aggregations = searchResponse.getAggregations();
+        Terms group_by_color = aggregations.get("group_by_color");
+        List<? extends Terms.Bucket> buckets = group_by_color.getBuckets();
+        for (Terms.Bucket bucket : buckets) {
+            String key = bucket.getKeyAsString();
+            System.out.println("key:"+key);
+
+            long docCount = bucket.getDocCount();
+            System.out.println("docCount:"+docCount);
+
+            Aggregations aggregations1 = bucket.getAggregations();
+
+            Max max_price = aggregations1.get("max_price");
+            double maxPriceValue = max_price.getValue();
+            System.out.println("maxPriceValue:"+maxPriceValue);
+
+            Min min_price = aggregations1.get("min_price");
+            double minPriceValue = min_price.getValue();
+            System.out.println("minPriceValue:"+minPriceValue);
+
+            Avg avg_price = aggregations1.get("avg_price");
+            double avgPriceValue = avg_price.getValue();
+            System.out.println("avgPriceValue:"+avgPriceValue);
+
+            Sum sum_price = aggregations1.get("sum_price");
+            double sumPriceValue = sum_price.getValue();
+            System.out.println("sumPriceValue:"+sumPriceValue);
+
+            System.out.println("=================================");
+        }
+    }
+
+    // #需求四：按照售价每2000价格划分范围，算出每个区间的销售总额 histogram
+    @Test
+    public void testAggsAndHistogram() throws IOException {
+        // GET /tvs/_search
+        // {
+        //     "size" : 0,
+        //     "aggs":{
+        //      "by_histogram":{
+        //         "histogram":{
+        //             "field": "price",
+        //             "interval": 2000
+        //         },
+        //         "aggs":{
+        //             "income": {
+        //                 "sum": {
+        //                     "field" : "price"
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        // }
+
+        //1 构建请求
+        SearchRequest searchRequest=new SearchRequest("tvs");
+
+        //请求体
+        SearchSourceBuilder searchSourceBuilder=new SearchSourceBuilder();
+        searchSourceBuilder.size(0);
+        searchSourceBuilder.query(QueryBuilders.matchAllQuery());
+
+        HistogramAggregationBuilder histogramAggregationBuilder = AggregationBuilders.histogram("by_histogram").field("price").interval(2000);
+
+        SumAggregationBuilder sumAggregationBuilder = AggregationBuilders.sum("income").field("price");
+        histogramAggregationBuilder.subAggregation(sumAggregationBuilder);
+        searchSourceBuilder.aggregation(histogramAggregationBuilder);
+
+        //请求体放入请求头
+        searchRequest.source(searchSourceBuilder);
+
+        //2 执行
+        SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
+
+        //3 获取结果
+        // {
+        //     "key" : 0.0,
+        //     "doc_count" : 3,
+        //      income" : {
+        //          "value" : 3700.0
+        //       }
+        // }
+        Aggregations aggregations = searchResponse.getAggregations();
+        Histogram group_by_color = aggregations.get("by_histogram");
+        List<? extends Histogram.Bucket> buckets = group_by_color.getBuckets();
+        for (Histogram.Bucket bucket : buckets) {
+            String keyAsString = bucket.getKeyAsString();
+            System.out.println("keyAsString:"+keyAsString);
+            long docCount = bucket.getDocCount();
+            System.out.println("docCount:"+docCount);
+
+            Aggregations aggregations1 = bucket.getAggregations();
+            Sum income = aggregations1.get("income");
+            double value = income.getValue();
+            System.out.println("value:"+value);
+
+            System.out.println("=================================");
+
+        }
+    }
+
+    // #需求五：计算每个季度的销售总额
+    @Test
+    public void testAggsAndDateHistogram() throws IOException {
+        // GET /tvs/_search
+        // {
+        //     "size" : 0,
+        //     "aggs": {
+        //     "sales": {
+        //         "date_histogram": {
+        //                      "field": "sold_date",
+        //                     "interval": "quarter",
+        //                     "format": "yyyy-MM-dd",
+        //                     "min_doc_count" : 0,
+        //                     "extended_bounds" : {
+        //                         "min" : "2019-01-01",
+        //                         "max" : "2020-12-31"
+        //             }
+        //         },
+        //         "aggs": {
+        //             "income": {
+        //                 "sum": {
+        //                     "field": "price"
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        // }
+
+        //1 构建请求
+        SearchRequest searchRequest=new SearchRequest("tvs");
+
+        //请求体
+        SearchSourceBuilder searchSourceBuilder=new SearchSourceBuilder();
+        searchSourceBuilder.size(0);
+        searchSourceBuilder.query(QueryBuilders.matchAllQuery());
+
+        DateHistogramAggregationBuilder dateHistogramAggregationBuilder = AggregationBuilders.dateHistogram("date_histogram").field("sold_date").calendarInterval(DateHistogramInterval.QUARTER)
+                .format("yyyy-MM-dd").minDocCount(0).extendedBounds(new ExtendedBounds("2019-01-01", "2020-12-31"));
+        SumAggregationBuilder sumAggregationBuilder = AggregationBuilders.sum("income").field("price");
+        dateHistogramAggregationBuilder.subAggregation(sumAggregationBuilder);
+
+        searchSourceBuilder.aggregation(dateHistogramAggregationBuilder);
+        //请求体放入请求头
+        searchRequest.source(searchSourceBuilder);
+
+        //2 执行
+        SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
+
+        //3 获取结果
+        // {
+        //     "key_as_string" : "2019-01-01",
+        //      "key" : 1546300800000,
+        //      "doc_count" : 0,
+        //      "income" : {
+        //         "value" : 0.0
+        //      }
+        // }
+        Aggregations aggregations = searchResponse.getAggregations();
+        ParsedDateHistogram date_histogram = aggregations.get("date_histogram");
+        List<? extends Histogram.Bucket> buckets = date_histogram.getBuckets();
+        for (Histogram.Bucket bucket : buckets) {
+            String keyAsString = bucket.getKeyAsString();
+            System.out.println("keyAsString:"+keyAsString);
+            long docCount = bucket.getDocCount();
+            System.out.println("docCount:"+docCount);
+
+            Aggregations aggregations1 = bucket.getAggregations();
+            Sum income = aggregations1.get("income");
+            double value = income.getValue();
+            System.out.println("value:"+value);
+
+            System.out.println("====================");
+        }
+
+    }
+
+}
+```
+
