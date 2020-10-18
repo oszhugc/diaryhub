@@ -455,11 +455,213 @@ collect : 将数据收集大Driver端展示.
 
   
 
+## 2.5 Yarn模式
+
+### 2.5.1 概述
+
+Spark客户端直接连接Yarn, 不需要额外构建Spark集群. 有yarn-client和yarn-cluster两种模式, 主要区别在于: Driver程序的运行节点. 
+
+yarn-client : Driver程序运行在客户端, 适用于交互, 调试, 希望立即看到app的输出
+
+yarn-cluster : Driver程序运行在由RM(ResourceManager)启动的AM(APPMaster), 适用于生产环境. 
+
+### 2.5.2 安装使用
+
+1. 修改hadoop配置文件yarn-site.xml, 添加如下内容
+
+   ```
+   [atguigu@hadoop102 hadoop]$ vi yarn-site.xml
+           <!--是否启动一个线程检查每个任务正使用的物理内存量，如果任务超出分配值，则直接将其杀掉，默认是true -->
+           <property>
+                   <name>yarn.nodemanager.pmem-check-enabled</name>
+                   <value>false</value>
+           </property>
+                   <!--是否启动一个线程检查每个任务正使用的虚拟内存量，如果任务超出分配值，则直接将其杀掉，默认是true -->
+           <property>
+                   <name>yarn.nodemanager.vmem-check-enabled</name>
+                   <value>false</value>
+           </property>
+   ```
+
+2. 修改spark-env.sh, 添加如下配置
+
+   ```
+   [atguigu@hadoop102 conf]$ vi spark-env.sh
+   
+   YARN_CONF_DIR=/opt/module/hadoop-2.7.2/etc/hadoop
+   ```
+
+3. 分发配置文件
+
+   ```
+   [atguigu@hadoop102 conf]$ xsync /opt/module/hadoop-2.7.2/etc/hadoop/yarn-site.xml
+   ```
+
+4. 执行一个程序
+
+   ```
+   [atguigu@hadoop102 spark]$ bin/spark-submit \
+   --class org.apache.spark.examples.SparkPi \
+   --master yarn \
+   --deploy-mode client \
+   ./examples/jars/spark-examples_2.11-2.1.1.jar \
+   100
+   ```
+
+   注意 :  在提交任务之前需启动HDF以及Yarn集群
+
+### 2.5.3 日志查看
+
+1. 修改配置文件 spark-defualts.conf
+
+   添加如下内容
+
+   ```
+   spark.yarn.historyServer.address=hadoop102:18080
+   spark.history.ui.port=18080
+   ```
+
+2. 重启spark历史服务
+
+   ```
+   [atguigu@hadoop102 spark]$ sbin/stop-history-server.sh 
+   stopping org.apache.spark.deploy.history.HistoryServer
+   [atguigu@hadoop102 spark]$ sbin/start-history-server.sh 
+   starting org.apache.spark.deploy.history.HistoryServer, logging to /opt/module/spark/logs/spark-atguigu-org.apache.spark.deploy.history.HistoryServer-1-hadoop102.out
+   ```
+
+3. 提交任务到Yarn执行
+
+   ```
+   [atguigu@hadoop102 spark]$ bin/spark-submit \
+   --class org.apache.spark.examples.SparkPi \
+   --master yarn \
+   --deploy-mode client \
+   ./examples/jars/spark-examples_2.11-2.1.1.jar \
+   100
+   ```
+
+4. Web页面查看日志
 
 
-  
 
-  
+# 3 案例实操
+
+Spark Shell仅在测试和试验我们的程序时使用的较多, 在生产环境中, 通常会在IDE中编写程序, 然后打成jar包, 然后提交到集群, 最常用的是创建一个maven项目, 利用maven来管理jar包依赖.
+
+## 3.1 编写WordCount程序
+
+1. 创建一个Maven项目WordCount并导入依赖
+
+   ```
+   <dependencies>
+       <dependency>
+           <groupId>org.apache.spark</groupId>
+           <artifactId>spark-core_2.11</artifactId>
+           <version>2.1.1</version>
+       </dependency>
+   </dependencies>
+   <build>
+           <finalName>WordCount</finalName>
+           <plugins>
+   <plugin>
+                   <groupId>net.alchim31.maven</groupId>
+   <artifactId>scala-maven-plugin</artifactId>
+                   <version>3.2.2</version>
+                   <executions>
+                       <execution>
+                          <goals>
+                             <goal>compile</goal>
+                             <goal>testCompile</goal>
+                          </goals>
+                       </execution>
+                    </executions>
+               </plugin>
+           </plugins>
+   </build>
+   ```
+
+2. 编写代码
+
+   ```
+   package com.atguigu
+   
+   import org.apache.spark.{SparkConf, SparkContext}
+   
+   object WordCount{
+   
+   	def main(args: Array[String]): Unit = {
+   	
+   		//1.创建SparkConf并设置App名称
+   		var conf = new SparkConf().setAppName("WC")
+   		//2.创建SparkContext, 该对象时提交Spark App的入口
+   		var sc = new SparkContext(conf)
+   		//3.使用sc创建RDD并执行相应的transformation和action
+   		sc.textFile(args(0)).flatMap(_.split(" ")).map((_, 1)).reduceByKey(_+_, 1).sortBy(_._2, false).saveAsTextFile(args(1))
+   		//4.关闭连接
+   		sc.stop()
+   		
+   	}
+   }
+   ```
+
+3. 打包插件
+
+   ```
+   	<plugin>
+                   <groupId>org.apache.maven.plugins</groupId>
+                   <artifactId>maven-assembly-plugin</artifactId>
+                   <version>3.0.0</version>
+                   <configuration>
+                       <archive>
+                           <manifest>
+                               <mainClass>WordCount</mainClass>
+                           </manifest>
+                       </archive>
+                       <descriptorRefs>
+                           <descriptorRef>jar-with-dependencies</descriptorRef>
+                       </descriptorRefs>
+                   </configuration>
+                   <executions>
+                       <execution>
+                           <id>make-assembly</id>
+                           <phase>package</phase>
+                           <goals>
+                               <goal>single</goal>
+                           </goals>
+                       </execution>
+                   </executions>
+         </plugin>
+   ```
+
+4. 打包到集群测试
+
+   ```
+   bin/spark-submit \
+   --class WordCount \
+   --master spark://hadoop102:7077 \
+   WordCount.jar \
+   /word.text \
+   /out
+   ```
+
+## 3.2 本地调试
+
+本地Spark程序调试需要使用local提交模式, 即在本机当做运行环境, Master和Worker都为本机. 运行时直接加断点调试即可. 如下:
+
+创建SparkConf的时候设置额外属性, 表明本地执行: 
+
+```
+var conf = new SparkConf().setAppName("WC").setMaster("local[*]")
+```
+
+如果本机操作系统是Windows, 如果在程序中使用了hadoop相关的东西, 比如写入文件到hdfs, 则会报io异常,
+
+出现这个问题的原因, 并不是程序的错误, 而是用了hadoop相关的服务, 解决办法是将附加里面的hadoop-common-bin-2.7.3-x64.zip解压到任何目录
+
+在ide中配置Run Configuration, 添加HADOOP_HOME变量. 
+
+
 
 
 
