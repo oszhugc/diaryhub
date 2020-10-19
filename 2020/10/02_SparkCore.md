@@ -1698,6 +1698,314 @@ cache和checkPoint的区别
 
 
 
+# 3 键值对RDD数据分区
+
+Spark目前支持Hash分区和Range分区, 用户也可以自定义分区, Hash分区为当前的默认分区, Spark中分区器直接决定了RDD中分区的个数, RDD中每条数据经过Shuffle过程属于哪个分区和Reduce的个数
+
+注意: 
+
+- 只有Key-Value类型的RDD才有分区的, 非Key-Value类型的RDD分区的值是None
+- 每个RDD的分区ID范围: 0~numPartitions-1, 决定这个值是属于那个分区的. 
+
+## 3.1 获取RDD分区
+
+可以通过使用RDD的partitoner属性来获取RDD的分区方式. 他会返回一个scala.Option对象, 通过get方法获取其中的值. 相关源码如下
+
+```
+def getPartition(key: Any): Int = key match{
+	case null => 0
+	case_ => Utils.nonNegativeMod(key.hashCode, numParitions)
+}
+def nonNegativeMod(x:Int, mod:Int): Int = {
+	val rawMod = x % mod
+	rawMod + (if(rawMod<0) mod else 0)
+}
+```
+
+1. 创建一个pairRDD
+
+   ```
+   scala> val pairs = sc.parallelize(List((1,1),(2,2),(3,3)))
+   pairs: org.apache.spark.rdd.RDD[(Int,Int)] = ParallelCollectionRDD[3] at parallelize at <console>:24
+   ```
+
+2. 查看RDD的分区器
+
+   ```
+   scala> pairs.partitioner
+   res1: Option[org.apache.spark.Partitioner] = None
+   ```
+
+3. 导入HashParitioner类
+
+   ```
+   scala> import org.apache.spark.HashPartitioner
+   import org.apache.spark.HashPartitioner
+   ```
+
+4. 使用HashPartitioner对RDD进行重新分区
+
+   ```
+   scala> val partitioned = pairs.partitionBy(new HashParitioner(2))
+   patitioned: org.apache.spark.rdd.RDD[(Int, Int)] = ShuffledRDD[4] at partitionBy at <console>:27
+   ```
+
+5. 查看从新分区后RDD的分区器
+
+   ```
+   scala> partitioned.partitioner
+   res2: Option[org.apache.spark.Partitioner] = Some(org.apache.spark.HashPartitioner@2)
+   ```
+
+## 3.2 Hash分区
+
+HashParitioner分区的原理: 对于给定的key, 计算其hashCode, 并除以分区的个数取余, 如果余数小于0, 则用余数+分区的个数(否则加0), 最后返回的值就是这个key所属的分区ID. 
+
+使用Hash分区的实操
+
+```
+scala> nopar.partitoner
+res20: Option[org.apache.spark.Partitoner] = None
+scala> val nopar = sc.parallelize(List((1,3),(1,2),(2,4),(3,6)),8)
+nopar: org.apache.spark.rdd.RDD[(Int,Int)] = ParallelConllectionRDD[10] at parallelize at <console>:24
+scala>nopar.mapPartitionsWithIndex((index,iter)=>{ Iterator(index.toString+" : "+iter.mkString("|")) }).collect
+res0: Array[String] = Array("0 : ", 1 : (1,3), 2 : (1,2), 3 : (2,4), "4 : ", 5 : (2,3), 6 : (3,6), 7 : (3,8)) 
+scala> val hashpar = nopar.partitionBy(new org.apache.spark.HashPartitioner(7))
+hashpar: org.apache.spark.rdd.RDD[(Int, Int)] = ShuffledRDD[12] at partitionBy at <console>:26
+
+scala> hashpar.count
+res18: Long = 6
+
+scala> hashpar.partitioner
+res21: Option[org.apache.spark.Partitioner] = Some(org.apache.spark.HashPartitioner@7)
+
+scala> hashpar.mapPartitions(iter => Iterator(iter.length)).collect()
+res19: Array[Int] = Array(0, 3, 1, 2, 0, 0, 0)
+```
+
+
+
+## 3.3 Ranger分区
+
+HashPartitoiner分区弊端 : 可能导致每个分区中的数据量的不均衡, 极端情况下会导致某些分区拥有RDD的全部数据
+
+RangePartitoner作用: 将一定范围内的数据映射到某一个分区内, 尽量保证每个分区中数据量的均衡, 而且分区与分区之间是有序的, 一个分区中的元素肯定都是比另一个分区内的源尿素大或者小, 但是分区内的元素是不保证顺序的. 简单的说就是将一定范围内的数据映射到某一个分区内. 实现过程为: 
+
+1. 先从整个RDD中抽取出样本数据, 将样本数据排序, 计算出每个分区的最大key值, 形成一个Array[key]类型的数组变量rangeBounds
+2. 判断key在rangeBounds中所处的范围, 给出该key值在下一个RDD中的分区id下标; 该分区器要求RDD中的key类型必须是可以排序的.
+
+
+
+## 3.4 自定义分区
+
+要实现自定义的分区器, 你需要继承org.apache.spark.Partitoner类并实现下面三个方法. 
+
+1. numPartitiones: Int : 返回创建出来的分区数
+2. getParition(key: Any):Int : 返回给定key的分区编号(0到numPartitons-1)
+3. equals(): java判断相等的标准方法. 这个方法的实现非常重要, Spark需要用这个方法来检查你的分区器对象是否和其他分区器实例相同, 这样spark才可以判断两个RDD的分区方式是否相同
+
+需求:将相同后缀的数据写入相同的文件, 通过将相同后缀的数据分区到相同的分区并保存,输出来实现
+
+1. 创建一个RDD
+
+   ```
+   scala> val data = sc.parallelize(Array((1,1),(2,2),(3,3),(4,4),(5,5),(6,6)))
+   data: org.apache.spark.rdd.RDD[(Int, Int)] = ParallelCollectionRDD[3] at parallelize at <console>:24
+   ```
+
+2. 定义一个自定义分区类
+
+   ```
+   scala> :paste
+   // Entering paste mode (ctrl-D to finish)
+   class CustomerPartitioner(numParts:Int) extends org.apache.spark.Partitioner{
+   
+     //覆盖分区数
+     override def numPartitions: Int = numParts
+   
+     //覆盖分区号获取函数
+     override def getPartition(key: Any): Int = {
+       val ckey: String = key.toString
+       ckey.substring(ckey.length-1).toInt%numParts
+     }
+   }
+   
+   // Exiting paste mode, now interpreting.
+   
+   defined class CustomerPartitioner
+   ```
+
+3. 将RDD使用自定义的分区类进行重新分区
+
+   ```
+   scala> val par = data.partitionBy(new CustomerPartitioner(2))
+   par: org.apache.spark.rdd.RDD[(Int, Int)] = ShuffledRDD[2] at partitionBy at <console>:27
+   ```
+
+4. 查看重新分区后的数据分布
+
+   ```
+   scala> par.mapPartitionsWithIndex((index,items)=>items.map((index,_))).collect
+   res3: Array[(Int, (Int, Int))] = Array((0,(2,2)), (0,(4,4)), (0,(6,6)), (1,(1,1)), (1,(3,3)), (1,(5,5)))
+   ```
+
+   使用自定义的Partitioner是很容易的; 只要把他传给partitonBy()方法即可. Spark中有许多依赖于数据清洗的方法, 比如join()和groupByKey(), 他们也可以接收可选的Partitioner对象来控制输出数据的分区方式. 
+
+
+
+# 4 数据读取和保存
+
+Spark的数据读取集数据保存可以从两个维度来做区分: 文件格式以及文件系统. 文件格式分为: Text文件, Json文件, Csv文件, Sequence文件以及Object文件; 文件系统分为: 本地文件系统, HDFS,HBASE以及数据库
+
+## 4.1 文件类数据读取和保存
+
+### 4.1.1 Text
+
+1. 数据读取: textFile(String)
+
+   ```
+   scala> val hdfsFile = sc.textFile("hdfs://hadoop102:9000/fruit.txt")
+   hdfsFile: org.apache.spark.rdd.RDD[String] = hdfs://hadoop102:9000/fruit.txt MapPartitionsRDD[21] at textFile at <console>:24
+   ```
+
+2. 数据保存: saveAsTextFile(String)
+
+   ```
+   scala> hdfsFile.saveAsTextFile("/fruitOut");
+   ```
+
+### 4.1.2 Json文件
+
+如果Json文件中每一行就是一个json记录, 那么可以通过将json文件当做文本文件来读取, 然后利用相关的json库对每一条数据进行json解析.
+
+注意 :  使用RDD读取json文件处理很复杂, 同时SparkSQL集成了很好的处理Json文件的方式, 所以应用中多是采用SparkSQL处理Json文件
+
+1. 导入解析json所需要的包
+
+   ```
+   scala> import scala.util.parsing.json.JSON
+   ```
+
+2. 上传json文件到hdfs
+
+   ```
+   [atguigu@hadoop102 spark]$ hadoop fs -put ./examples/src/main/resources/people.json /
+   ```
+
+3. 读取文件
+
+   ```
+   scala> val json = sc.textFile("/people.json")
+   json: org.apache.spark.rdd.RDD[String] = /people.json MapPartitionsRDD[8] at textFile at <console>:24
+   ```
+
+4. 解析json数据
+
+   ```
+   scala> val result  = json.map(JSON.parseFull)
+   result: org.apache.spark.rdd.RDD[Option[Any]] = MapPartitionsRDD[10] at map at <console>:27
+   （5）打印
+   scala> result.collect
+   res11: Array[Option[Any]] = Array(Some(Map(name -> Michael)), Some(Map(name -> Andy, age -> 30.0)), Some(Map(name -> Justin, age -> 19.0)))
+   ```
+
+### 4.1.3 Sequence文件
+
+SequenceFile文件是Hadoop用来存储二进制形式的key-value对而设计的一种平面文件(Flat File). Spark有专门用来读取SequenceFile的接口. 在SparkContext中, 可以调用sequenceFile(keyClass, valueClass)(path)
+
+注意: SequenceFile文件只针对PairRDD
+
+1. 创建一个RDD
+
+   ```
+   scala> val rdd = sc.parallelize(Array((1,2),(3,4),(5,6)))
+   rdd: org.apache.spark.rdd.RDD[(Int, Int)] = ParallelCollectionRDD[13] at parallelize at <console>:24
+   ```
+
+2. 将RDD保存为Sequence文件
+
+   ```
+   scala> rdd.saveAsSequenceFile("file:///opt/module/spark/seqFile")
+   ```
+
+3. 查看该文件
+
+   ```
+   [atguigu@hadoop102 seqFile]$ pwd
+   /opt/module/spark/seqFile
+   
+   [atguigu@hadoop102 seqFile]$ ll
+   总用量 8
+   -rw-r--r-- 1 atguigu atguigu 108 10月  9 10:29 part-00000
+   -rw-r--r-- 1 atguigu atguigu 124 10月  9 10:29 part-00001
+   -rw-r--r-- 1 atguigu atguigu   0 10月  9 10:29 _SUCCESS
+   
+   [atguigu@hadoop102 seqFile]$ cat part-00000
+   SEQ org.apache.hadoop.io.IntWritable org.apache.hadoop.io.IntWritableط
+   ```
+
+4. 读取Sequence文件
+
+   ```
+   scala> val seq = sc.sequenceFile[Int,Int]("file:///opt/module/spark/seqFile")
+   seq: org.apache.spark.rdd.RDD[(Int, Int)] = MapPartitionsRDD[18] at sequenceFile at <console>:24
+   ```
+
+5. 打印读取后的Sequence文件
+
+   ```
+   scala> seq.collect
+   res14: Array[(Int, Int)] = Array((1,2), (3,4), (5,6))
+   ```
+
+### 4.1.4 对象文件
+
+对象文件是将对象序列化后保存的文件，采用Java的序列化机制。可以通过objectFile[k,v](path) 函数接收一个路径，读取对象文件，返回对应的 RDD，也可以通过调用saveAsObjectFile() 实现对对象文件的输出。因为是序列化所以要指定类型。
+
+1. 创建一个RDD
+
+   ```
+   scala> val rdd = sc.parallelize(Array(1,2,3,4))
+   rdd: org.apache.spark.rdd.RDD[Int] = ParallelCollectionRDD[19] at parallelize at <console>:24
+   ```
+
+2. 将RDD保存为Object文件
+
+   ```
+   scala> rdd.saveAsObjectFile("file:///opt/module/spark/objectFile")
+   ```
+
+3. 查看该文件
+
+   ```
+   [atguigu@hadoop102 objectFile]$ pwd
+   /opt/module/spark/objectFile
+   
+   [atguigu@hadoop102 objectFile]$ ll
+   总用量 8
+   -rw-r--r-- 1 atguigu atguigu 142 10月  9 10:37 part-00000
+   -rw-r--r-- 1 atguigu atguigu 142 10月  9 10:37 part-00001
+   -rw-r--r-- 1 atguigu atguigu   0 10月  9 10:37 _SUCCESS
+   
+   [atguigu@hadoop102 objectFile]$ cat part-00000
+   SEQ!org.apache.hadoop.io.NullWritable"org.apache.hadoop.io.BytesWritableW@`l
+   ```
+
+4. 读取Object文件
+
+   ```
+   scala> val objFile = sc.objectFile[(Int)]("file:///opt/module/spark/objectFile")
+   objFile: org.apache.spark.rdd.RDD[Int] = MapPartitionsRDD[31] at objectFile at <console>:24
+   ```
+
+5. 打印读取后的Sequence文件
+
+   ```
+   scala> objFile.collect
+   res19: Array[Int] = Array(1, 2, 3, 4)
+   ```
+
+   
 
 
 
@@ -1705,4 +2013,11 @@ cache和checkPoint的区别
 
 
 
-​     
+
+
+
+
+
+
+
+
